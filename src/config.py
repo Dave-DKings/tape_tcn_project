@@ -479,8 +479,11 @@ PHASE1_CONFIG = {
         "tape_checkpoint_threshold": 4.0,
         # Periodic safety snapshots independent of TAPE threshold.
         "periodic_checkpoint_every_steps": 10_000,
-        # Save snapshots whenever live step-level Sharpe is strong.
-        "step_sharpe_checkpoint_enabled": True,
+        # Episode-level high-watermark snapshots (save on new best Sharpe >= threshold).
+        "high_watermark_checkpoint_enabled": True,
+        "high_watermark_sharpe_threshold": 0.5,
+        # Optional per-step snapshots (very noisy; disabled by default).
+        "step_sharpe_checkpoint_enabled": False,
         "step_sharpe_checkpoint_threshold": 0.5,
 
         # Actor LR schedule (canonical across project).
@@ -735,8 +738,11 @@ PHASE2_CONFIG = {
         "tape_checkpoint_threshold": 4.0,
         # Periodic safety snapshots independent of TAPE threshold.
         "periodic_checkpoint_every_steps": 10_000,
-        # Save snapshots whenever live step-level Sharpe is strong.
-        "step_sharpe_checkpoint_enabled": True,
+        # Episode-level high-watermark snapshots (save on new best Sharpe >= threshold).
+        "high_watermark_checkpoint_enabled": True,
+        "high_watermark_sharpe_threshold": 0.5,
+        # Optional per-step snapshots (very noisy; disabled by default).
+        "step_sharpe_checkpoint_enabled": False,
         "step_sharpe_checkpoint_threshold": 0.5,
         
         "results_path": os.path.join(BASE_PROJECT_PATH, 'results', "phase2_advanced_prototype")

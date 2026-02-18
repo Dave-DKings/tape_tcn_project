@@ -312,10 +312,10 @@ def _infer_results_root_from_actor_weights(actor_path: Path) -> Path:
 
 
 def _extract_episode_number_from_name(name: str, exp_idx: int) -> Optional[int]:
-    """Parse episode number from checkpoint names like exp6_tape_ep31_*.weights.h5."""
+    """Parse episode number from names like exp6_tape_ep31_* or exp6_tape_hw_ep31_*."""
     import re
 
-    pattern = rf"exp{int(exp_idx)}_(?:tape_)?ep(\d+)"
+    pattern = rf"exp{int(exp_idx)}_(?:tape_)?(?:hw_)?ep(\d+)"
     match = re.search(pattern, name)
     if not match:
         return None
@@ -1847,7 +1847,34 @@ def run_experiment6_tape(
             f"(Sharpe={sharpe_float:.3f})"
         )
 
-    step_sharpe_checkpoint_enabled_cfg = bool(training_params.get("step_sharpe_checkpoint_enabled", True))
+    def maybe_save_high_watermark_checkpoint(
+        episode_idx: int,
+        metrics_dict: Dict[str, float],
+    ) -> None:
+        if not high_watermark_checkpoint_enabled:
+            return
+        sharpe_val = to_scalar(metrics_dict.get("sharpe_ratio"))
+        if sharpe_val is None:
+            return
+        sharpe_float = float(sharpe_val)
+        if sharpe_float < high_watermark_sharpe_threshold:
+            return
+        high_watermark_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        sharpe_tag = _format_checkpoint_metric_tag(sharpe_float)
+        prefix = high_watermark_checkpoint_dir / (
+            f"exp{exp_idx}_tape_hw_ep{episode_idx:05d}_sh{sharpe_tag}"
+        )
+        agent.save_models(str(prefix))
+        print(
+            "      💾 Sharpe-threshold checkpoint saved: "
+            f"{prefix}_actor.weights.h5 (Sharpe={sharpe_float:.3f})"
+        )
+
+    high_watermark_checkpoint_enabled_cfg = bool(training_params.get("high_watermark_checkpoint_enabled", True))
+    high_watermark_sharpe_threshold_cfg = float(training_params.get("high_watermark_sharpe_threshold", 0.5))
+    if high_watermark_sharpe_threshold_cfg < 0.5:
+        high_watermark_sharpe_threshold_cfg = 0.5
+    step_sharpe_checkpoint_enabled_cfg = bool(training_params.get("step_sharpe_checkpoint_enabled", False))
     step_sharpe_checkpoint_threshold_cfg = float(training_params.get("step_sharpe_checkpoint_threshold", 0.5))
 
     print(f"\n🎯 Starting THREE-COMPONENT TAPE v3 training (with curriculum)...")
@@ -1865,6 +1892,13 @@ def run_experiment6_tape(
     print(f"   📚 Turnover Scalar Curriculum:")
     for threshold, scalar in sorted(turnover_curriculum.items(), key=lambda item: item[0]):
         print(f"      {threshold:,}+ steps: scalar={scalar:.2f}")
+    if high_watermark_checkpoint_enabled_cfg:
+        print(
+            "   🏆 High-Watermark checkpoints: "
+            f"enabled (save every episode with Sharpe >= {high_watermark_sharpe_threshold_cfg:.2f})"
+        )
+    else:
+        print("   🏆 High-Watermark checkpoints: disabled")
     if step_sharpe_checkpoint_enabled_cfg:
         print(
             "   🧷 Step-Sharpe checkpoints: "
@@ -1898,6 +1932,10 @@ def run_experiment6_tape(
         "legacy_final_alias_supported": True,
         "tape_checkpoint_threshold_bonus": float(training_params.get("tape_checkpoint_threshold", 4.0)),
         "periodic_checkpoint_every_steps": int(training_params.get("periodic_checkpoint_every_steps", 10_000)),
+        "high_watermark_checkpoint_enabled": bool(high_watermark_checkpoint_enabled_cfg),
+        "high_watermark_sharpe_threshold": float(high_watermark_sharpe_threshold_cfg),
+        "high_watermark_checkpoint_subdir": "high_watermark_checkpoints",
+        "high_watermark_logic": "save_on_every_episode_sharpe_threshold",
         "step_sharpe_checkpoint_enabled": bool(step_sharpe_checkpoint_enabled_cfg),
         "step_sharpe_checkpoint_threshold": float(step_sharpe_checkpoint_threshold_cfg),
         "step_sharpe_checkpoint_subdir": "step_sharpe_checkpoints",
@@ -2005,6 +2043,9 @@ def run_experiment6_tape(
     done = False
     tape_threshold = float(training_params.get("tape_checkpoint_threshold", 4.0))
     periodic_checkpoint_every_steps = int(training_params.get("periodic_checkpoint_every_steps", 10_000))
+    high_watermark_checkpoint_enabled = bool(high_watermark_checkpoint_enabled_cfg)
+    high_watermark_sharpe_threshold = float(high_watermark_sharpe_threshold_cfg)
+    high_watermark_checkpoint_dir = results_root / "high_watermark_checkpoints"
     step_sharpe_checkpoint_enabled = bool(step_sharpe_checkpoint_enabled_cfg)
     step_sharpe_checkpoint_threshold = float(step_sharpe_checkpoint_threshold_cfg)
     step_sharpe_checkpoint_dir = results_root / "step_sharpe_checkpoints"
@@ -2159,6 +2200,7 @@ def run_experiment6_tape(
                     elif not did_clip:
                         last_tape_bonus_clipped = False
 
+                maybe_save_high_watermark_checkpoint(training_episode_count, metrics_current)
                 maybe_save_rare_checkpoint(training_episode_count, metrics_current)
                 obs, info = env_train.reset()
                 done = False
