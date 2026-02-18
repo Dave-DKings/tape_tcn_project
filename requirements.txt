@@ -20,9 +20,16 @@ scipy>=1.10
 scikit-learn>=1.3
 joblib>=1.3
 yfinance>=0.2.38
-pandas-ta>=0.3.14b0
 fredapi>=0.5.1
 gymnasium>=0.29
 h5py>=3.10
 openpyxl>=3.1
 stable-baselines3>=2.3
+
+# NOTE:
+# pandas-ta is intentionally excluded from base requirements because Colab's
+# resolver often pulls conflicting numpy/pandas builds while resolving it.
+# Install it in a separate cell after requirements:
+#   %pip install --no-deps pandas-ta==0.4.71b0
+# or fallback:
+#   %pip install git+https://github.com/twopirllc/pandas-ta.git
