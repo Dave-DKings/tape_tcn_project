@@ -1,0 +1,7 @@
+Deep reinforcement learning (DRL) for portfolio management often struggles with sparse rewards, catastrophic drawdowns, and loss of performance when generalizing to new market regimes. 
+In this paper, we present \textbf{TAPE-TCN}, a production-grade framework that synthesizes \textbf{Temporal Convolutional Networks (TCN)} for long-range pattern extraction, \textbf{Actuarial Risk Features} for predictive drawdown control, and the \textbf{Targeted Adaptive Performance Engine (TAPE)} for multi-objective reward shaping. 
+The agent operates via a \textbf{Dirichlet policy} that guarantees valid, simplex-compliant portfolio weights without post-hoc clipping.
+
+Trained on a diversified US equity universe and cash from 2011 to 2019, the model is evaluated on a rigorous out-of-sample test set from \textbf{January 2020 to November 2025}, a period covering the COVID-19 crash, the 2022 inflationary bear market, and the subsequent recovery.
+Quantitative results are currently reported as \textbf{placeholders} while the full variant sweep (\textit{TCN, TCN+Attention, and TCN+Fusion}) is being finalized under a unified evaluation protocol.
+The final manuscript will report deterministic and stochastic metrics (return, Sharpe, Sortino, maximum drawdown, turnover, and robustness across horizons) with run-level traceability to logged checkpoints.

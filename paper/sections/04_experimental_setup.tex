@@ -1,0 +1,30 @@
+\subsection{Data Description}
+We utilize daily Open-High-Low-Close-Volume (OHLCV) data for a concentrated portfolio of 5 major US equities representing diverse sectors: Apple (AAPL), Microsoft (MSFT), Exxon Mobil (XOM), Johnson \& Johnson (JNJ), and Alphabet (GOOGL), plus a risk-free Cash asset.
+Data is sourced from Yahoo Finance via the \texttt{yfinance} API.
+
+\subsection{Train-Test Split}
+To ensure rigorous out-of-sample evaluation, we split the data chronologically:
+\begin{itemize}
+    \item \textbf{Training Set (In-Sample):} Jan 1, 2011 -- Dec 31, 2019 (2,263 trading days). This period is characterized by a secular bull market with low volatility.
+    \item \textbf{Testing Set (Out-of-Sample):} Jan 1, 2020 -- Nov 30, 2025 (1,488 trading days). This window was explicitly chosen to test generalization, as it contains three distinct "black swan" regimes never seen during training:
+    \begin{enumerate}
+        \item The COVID-19 Crash (Feb-Mar 2020).
+        \item The Inflationary Bear Market \& Rate Hikes (2022).
+        \item The AI-Driven Tech Rally (2023-2025).
+    \end{enumerate}
+\end{itemize}
+
+\subsection{Baselines}
+We compare TAPE-TCN against:
+\begin{enumerate}
+    \item \textbf{S\&P 500 Benchmark}: A buy-and-hold strategy on the SPY ETF, representing the market beta.
+    \item \textbf{Mean-Variance Optimization (MVO)}: A classic Markowitz portfolio rebalanced monthly, using a rolling 60-day covariance matrix to minimize variance for a target return.
+    \item \textbf{Uniform Constant Rebalanced Portfolio (UCRP)}: An Equal-Weight strategy rebalanced daily.
+\end{enumerate}
+
+\subsection{Implementation Details}
+The agent is trained using Proximal Policy Optimization (PPO) \citep{schulman2017proximal} with a clipped objective. We use separate Actor and Critic networks sharing the TCN backbone.
+Hyperparameters: Learning rate $5 \times 10^{-4}$ (both actor and critic), PPO clip ratio 0.2, discount factor $\gamma=0.99$, and GAE parameter $\lambda=0.9$.
+Training runs for 150{,}000 steps with a PPO mini-batch size of 64.
+Episodes are dynamically truncated using curriculum learning, gradually increasing episode length from 504 to 1{,}200 trading days.
+Turnover penalty scaling follows a curriculum that increases intensity progressively throughout training.

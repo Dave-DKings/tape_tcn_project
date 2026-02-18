@@ -33,12 +33,13 @@ except ImportError:
     # Colab fallback: community-maintained package with mostly compatible API.
     import pandas_ta_classic as ta
 import fredapi
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 import joblib
 import warnings
 from typing import Dict, List, Tuple, Optional, Any, Union
 import logging
 from datetime import datetime, timedelta
+from collections import Counter
 try:
     # Preferred when imported as package module: `from src.data_utils import ...`
     from .actuarial import DrawdownReserveEstimator
@@ -1081,7 +1082,8 @@ class DataProcessor:
         df_sorted = df_sorted.sort_index()
 
         # ------------------------------------------------------------------
-        # Fill rolling-window warm-up NaNs via per-ticker ffill → bfill → 0
+        # Fill rolling-window warm-up NaNs via per-ticker ffill only.
+        # Never backfill from future dates to avoid temporal leakage.
         # ------------------------------------------------------------------
         filled_count = 0
         for col in new_cols:
@@ -1321,11 +1323,14 @@ class DataProcessor:
                 .rank(method='dense', pct=True)
             )
             new_cols.append("BetaRank")
-            
-            # Binary flags for extreme beta values
-            df["HighBeta_Flag"] = (df["Beta_to_Market"] > 1.2).astype(float)
-            df["LowBeta_Flag"] = (df["Beta_to_Market"] < 0.8).astype(float)
-            new_cols.extend(["HighBeta_Flag", "LowBeta_Flag"])
+
+            # Optional binary flags for extreme beta values (disabled by default).
+            if bool(cross_cfg.get("include_beta_flags", False)):
+                high_beta_threshold = float(cross_cfg.get("high_beta_threshold", 1.2))
+                low_beta_threshold = float(cross_cfg.get("low_beta_threshold", 0.8))
+                df["HighBeta_Flag"] = (df["Beta_to_Market"] > high_beta_threshold).astype(float)
+                df["LowBeta_Flag"] = (df["Beta_to_Market"] < low_beta_threshold).astype(float)
+                new_cols.extend(["HighBeta_Flag", "LowBeta_Flag"])
         
         # ------------------------------------------------------------------
         # 4. VOLATILITY RANKINGS (BONUS: complementary to momentum)
@@ -1489,7 +1494,148 @@ class DataProcessor:
 
         self._macro_feature_names = feature_names.copy()
         return macro_df, feature_names
-    
+
+    @staticmethod
+    def _is_bounded_feature_name(column: str) -> bool:
+        if not column:
+            return False
+        if column.endswith("_Flag") or column == "YieldCurve_Inverted_Flag":
+            return True
+        if "Rank" in column:
+            return True
+        bounded_prefixes = ("RSI_", "STOCHk_", "STOCHd_", "WILLR_", "MFI_")
+        return column.startswith(bounded_prefixes)
+
+    @staticmethod
+    def _is_macro_level_feature_name(column: str) -> bool:
+        if not column or not column.endswith("_level"):
+            return False
+        macro_prefixes = (
+            "EFFR_",
+            "SOFR_",
+            "FEDFUNDS_",
+            "DGS",
+            "T10Y",
+            "TIPS",
+            "BreakevenInf",
+            "IG_Credit_",
+            "HY_Credit_",
+            "VIX_",
+            "MOVE_",
+            "UNRATE_",
+            "PAYEMS_",
+            "INDPRO_",
+            "CPI_",
+            "PPI_",
+            "FedBalanceSheet_",
+            "ON_RRP_",
+        )
+        return column.startswith(macro_prefixes)
+
+    @staticmethod
+    def _is_heavy_tail_feature_name(column: str) -> bool:
+        if not column:
+            return False
+        heavy_prefixes = (
+            "LogReturn_",
+            "RollingVolatility_",
+            "DownsideSemiVar_",
+            "RealizedSkew_",
+            "RealizedKurtosis_",
+            "MACD_",
+            "MACDh_",
+            "MACDs_",
+            "ATR",
+            "NATR_",
+            "VOL_",
+            "OBV",
+            "Volume_",
+            "Residual_Momentum_",
+            "ShortTerm_Reversal_",
+            "VolOfVol_",
+            "Beta_to_Market",
+            "Covariance_Eigenvalue_",
+            "Fundamental_",
+            "Actuarial_",
+        )
+        if column.startswith(heavy_prefixes):
+            return True
+        return column in {"YieldCurve_Spread"}
+
+    def _normalization_strategy(self, column: str) -> str:
+        """
+        Route features to family-aware normalization strategies:
+        - bounded: bounded indicators/binary/ranks
+        - macro_diff_standard: macro levels transformed by date-difference then z-scored
+        - robust_winsor: heavy-tail features use robust scaling + percentile winsorization
+        - standard: default fallback
+        """
+        if self._is_bounded_feature_name(column):
+            return "bounded"
+        if self._is_macro_level_feature_name(column):
+            return "macro_diff_standard"
+        if self._is_heavy_tail_feature_name(column):
+            return "robust_winsor"
+        return "standard"
+
+    def _transform_bounded_values(self, values: np.ndarray, column: str) -> np.ndarray:
+        arr = np.asarray(values, dtype=np.float64)
+        transformed = arr.copy()
+
+        if column.endswith("_Flag") or column == "YieldCurve_Inverted_Flag":
+            return np.nan_to_num(transformed, nan=0.0, posinf=1.0, neginf=0.0)
+        if "Rank" in column:
+            transformed = (transformed * 2.0) - 1.0
+            return np.nan_to_num(transformed, nan=0.0, posinf=1.0, neginf=-1.0)
+        if column.startswith(("RSI_", "STOCHk_", "STOCHd_", "MFI_")):
+            transformed = (transformed - 50.0) / 50.0
+            return np.nan_to_num(transformed, nan=0.0, posinf=1.0, neginf=-1.0)
+        if column.startswith("WILLR_"):
+            transformed = (transformed + 50.0) / 50.0
+            return np.nan_to_num(transformed, nan=0.0, posinf=1.0, neginf=-1.0)
+
+        return np.nan_to_num(transformed, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def _macro_level_diff_by_date(self, df: pd.DataFrame, column: str) -> np.ndarray:
+        raw_series = pd.to_numeric(df[column], errors="coerce")
+        if self.date_col not in df.columns:
+            return raw_series.diff().to_numpy(dtype=np.float64, copy=False)
+
+        dates = pd.to_datetime(df[self.date_col], errors="coerce")
+        by_date = raw_series.groupby(dates).mean().sort_index()
+        diff_by_date = by_date.diff()
+        mapped = dates.map(diff_by_date)
+        return np.asarray(mapped, dtype=np.float64)
+
+    def _log_normalization_strategy_summary(
+        self,
+        feature_cols: List[str],
+        fitted_scalers: Dict[str, Any],
+        mode: str,
+    ) -> None:
+        counts: Counter = Counter()
+        for col in feature_cols:
+            spec = fitted_scalers.get(col)
+            if isinstance(spec, dict):
+                method = str(spec.get("method", "standard"))
+            elif spec is None:
+                method = "missing"
+            else:
+                method = "legacy_scaler"
+            counts[method] += 1
+
+        logger.info(
+            "Normalization strategy summary (%s): total=%d | bounded=%d | macro_diff_standard=%d | robust_winsor=%d | standard=%d | legacy_scaler=%d | missing=%d",
+            mode,
+            len(feature_cols),
+            counts.get("bounded", 0),
+            counts.get("macro_diff_standard", 0),
+            counts.get("robust_winsor", 0),
+            counts.get("standard", 0),
+            counts.get("legacy_scaler", 0),
+            counts.get("missing", 0),
+        )
+        
     def normalize_features(self, 
                           df: pd.DataFrame,
                           feature_cols: List[str] = None,
@@ -1576,80 +1722,132 @@ class DataProcessor:
         
         # Initialize scalers dictionary
         fitted_scalers = existing_scalers.copy() if existing_scalers else {}
+        train_mask_arr = np.asarray(train_mask, dtype=bool) if mode == 'train' else np.zeros(len(df_copy), dtype=bool)
         
         # Normalize each feature column
         for col in feature_cols:
             try:
+                all_values = pd.to_numeric(df_copy[col], errors='coerce').to_numpy(dtype=np.float64, copy=False)
+                finite_mask = np.isfinite(all_values)
+
                 if mode == 'train':
-                    # Fit scaler on training data only
-                    train_values = train_data[col].dropna().values
+                    # Fit transforms/scalers on training data only
+                    train_values = all_values[train_mask_arr & finite_mask]
                     
                     if len(train_values) == 0:
                         logger.warning(f"No valid training data for column {col}, skipping normalization")
                         continue
                     
-                    # Ensure we have enough data for robust statistics
+                    # Ensure we have enough data for stable statistics
                     if len(train_values) < 100:
                         logger.warning(f"Limited training data for {col}: {len(train_values)} samples")
+
+                    strategy = self._normalization_strategy(col)
+                    transformed = np.full(all_values.shape, np.nan, dtype=np.float64)
+
+                    if strategy == "bounded":
+                        transformed = self._transform_bounded_values(all_values, col)
+                        fitted_scalers[col] = {"method": "bounded"}
+                        logger.info(f"✅ {col}: applied bounded normalization")
+
+                    elif strategy == "macro_diff_standard":
+                        macro_diff_all = self._macro_level_diff_by_date(df_copy, col)
+                        macro_finite = np.isfinite(macro_diff_all)
+                        train_macro = macro_diff_all[train_mask_arr & macro_finite]
+                        if len(train_macro) == 0:
+                            logger.warning(f"No valid macro diff values for {col}, falling back to standard scaling")
+                            strategy = "standard"
+                        else:
+                            scaler = StandardScaler()
+                            scaler.fit(train_macro.reshape(-1, 1))
+                            transformed[macro_finite] = scaler.transform(macro_diff_all[macro_finite].reshape(-1, 1)).flatten()
+                            fitted_scalers[col] = {"method": "macro_diff_standard", "scaler": scaler}
+                            logger.info(f"✅ {col}: applied macro diff-then-zscore normalization")
+
+                    if strategy == "robust_winsor":
+                        winsor_low, winsor_high = np.nanpercentile(train_values, [0.5, 99.5])
+                        if not np.isfinite(winsor_low) or not np.isfinite(winsor_high) or winsor_low == winsor_high:
+                            winsor_low = float(np.nanmin(train_values))
+                            winsor_high = float(np.nanmax(train_values))
+                        clipped_train = np.clip(train_values, winsor_low, winsor_high)
+                        clipped_all = np.clip(all_values, winsor_low, winsor_high)
+                        scaler = RobustScaler(quantile_range=(25.0, 75.0))
+                        scaler.fit(clipped_train.reshape(-1, 1))
+                        transformed[finite_mask] = scaler.transform(clipped_all[finite_mask].reshape(-1, 1)).flatten()
+                        fitted_scalers[col] = {
+                            "method": "robust_winsor",
+                            "scaler": scaler,
+                            "winsor_low": float(winsor_low),
+                            "winsor_high": float(winsor_high),
+                        }
+                        logger.info(
+                            f"✅ {col}: applied robust+winsor normalization "
+                            f"(p0.5={winsor_low:.6f}, p99.5={winsor_high:.6f})"
+                        )
+
+                    if strategy == "standard":
+                        if scaler_type == 'standard':
+                            scaler = StandardScaler()
+                        elif scaler_type == 'minmax':
+                            scaler = MinMaxScaler()
+                        else:
+                            raise ValueError(f"Unknown scaler type: {scaler_type}")
+
+                        scaler.fit(train_values.reshape(-1, 1))
+                        transformed[finite_mask] = scaler.transform(all_values[finite_mask].reshape(-1, 1)).flatten()
+                        fitted_scalers[col] = {"method": "standard", "scaler": scaler}
+
+                        transformed_train = transformed[train_mask_arr & np.isfinite(transformed)]
+                        if transformed_train.size > 0:
+                            train_mean = float(np.mean(transformed_train))
+                            train_std = float(np.std(transformed_train))
+                            logger.info(f"✅ {col}: train_mean={train_mean:.4f}, train_std={train_std:.4f}")
+                            if abs(train_mean) > 0.01 or abs(train_std - 1.0) > 0.05:
+                                logger.warning(f"⚠️  {col}: Normalization quality check failed!")
+
+                    df_copy[col] = transformed
                     
-                    # Create and fit scaler
-                    if scaler_type == 'standard':
-                        scaler = StandardScaler()
-                    elif scaler_type == 'minmax':
-                        scaler = MinMaxScaler()
+                elif mode == 'eval':
+                    spec = fitted_scalers.get(col)
+                    if spec is None:
+                        logger.warning(f"Scaler for column {col} not found in existing scalers")
+                        continue
+
+                    transformed = np.full(all_values.shape, np.nan, dtype=np.float64)
+                    if isinstance(spec, dict):
+                        method = str(spec.get("method", "standard"))
+                        if method == "bounded":
+                            transformed = self._transform_bounded_values(all_values, col)
+                        elif method == "macro_diff_standard":
+                            scaler = spec.get("scaler")
+                            if scaler is None:
+                                logger.warning(f"Macro scaler missing for {col}; skipping")
+                                continue
+                            macro_diff_all = self._macro_level_diff_by_date(df_copy, col)
+                            macro_finite = np.isfinite(macro_diff_all)
+                            transformed[macro_finite] = scaler.transform(
+                                macro_diff_all[macro_finite].reshape(-1, 1)
+                            ).flatten()
+                        elif method == "robust_winsor":
+                            scaler = spec.get("scaler")
+                            if scaler is None:
+                                logger.warning(f"Robust scaler missing for {col}; skipping")
+                                continue
+                            low = float(spec.get("winsor_low", np.nan))
+                            high = float(spec.get("winsor_high", np.nan))
+                            clipped_all = np.clip(all_values, low, high)
+                            transformed[finite_mask] = scaler.transform(clipped_all[finite_mask].reshape(-1, 1)).flatten()
+                        else:
+                            scaler = spec.get("scaler")
+                            if scaler is None:
+                                logger.warning(f"Standard scaler missing for {col}; skipping")
+                                continue
+                            transformed[finite_mask] = scaler.transform(all_values[finite_mask].reshape(-1, 1)).flatten()
                     else:
-                        raise ValueError(f"Unknown scaler type: {scaler_type}")
-                    
-                    # Fit scaler on training data
-                    scaler.fit(train_values.reshape(-1, 1))
-                    fitted_scalers[col] = scaler
-                    
-                    # Apply scaler to entire dataset
-                    all_values = df_copy[col].values
-                    
-                    # Handle different data types properly
-                    if all_values.dtype == 'object':
-                        # Convert object arrays to float, handling any non-numeric values
-                        try:
-                            all_values = pd.to_numeric(all_values, errors='coerce').values
-                        except:
-                            logger.warning(f"Could not convert {col} to numeric, skipping normalization")
-                            continue
-                    
-                    # Find non-NaN values
-                    non_nan_mask = ~np.isnan(all_values)
-                    if np.any(non_nan_mask):
-                        # Transform values
-                        transformed = scaler.transform(all_values[non_nan_mask].reshape(-1, 1)).flatten()
-                        
-                        # Clip to prevent extreme values from causing gradient instability
-                        # ±5σ captures 99.9999% of normal distribution while preventing outliers
-                        n_extreme = np.sum((transformed < -5.0) | (transformed > 5.0))
-                        if n_extreme > 0:
-                            logger.warning(f"⚠️  {col}: Found {n_extreme} extreme values (beyond ±5σ), clipping...")
-                            transformed = np.clip(transformed, -5.0, 5.0)
-                        
-                        df_copy.loc[non_nan_mask, col] = transformed
-                    
-                    # Validation: Check normalization quality
-                    transformed_train = scaler.transform(train_values.reshape(-1, 1)).flatten()
-                    # Also clip training validation
-                    transformed_train = np.clip(transformed_train, -5.0, 5.0)
-                    train_mean = np.mean(transformed_train)
-                    train_std = np.std(transformed_train)
-                    
-                    logger.info(f"✅ {col}: train_mean={train_mean:.4f}, train_std={train_std:.4f}")
-                    
-                    if abs(train_mean) > 0.01 or abs(train_std - 1.0) > 0.05:
-                        logger.warning(f"⚠️  {col}: Normalization quality check failed!")
-                    
-                elif mode == 'eval' and col in fitted_scalers:
-                    # Apply existing scaler
-                    all_values = df_copy[col].values.reshape(-1, 1)
-                    df_copy[col] = fitted_scalers[col].transform(all_values).flatten()
-                    
-                elif mode == 'eval' and col not in fitted_scalers:
-                    logger.warning(f"Scaler for column {col} not found in existing scalers")
+                        # Backward compatibility: allow legacy plain scaler objects.
+                        transformed[finite_mask] = spec.transform(all_values[finite_mask].reshape(-1, 1)).flatten()
+
+                    df_copy[col] = transformed
                     
             except Exception as e:
                 logger.error(f"Failed to normalize column {col}: {e}")
@@ -1678,7 +1876,8 @@ class DataProcessor:
             )
         else:
             logger.info("Evaluation mode: skipping scaler re-fit enforcement to preserve train-only statistics.")
-        
+
+        self._log_normalization_strategy_summary(feature_cols, fitted_scalers, mode)
         logger.info(f"Feature normalization completed. Final shape: {df_copy.shape}")
         
         return df_copy, fitted_scalers
@@ -1706,6 +1905,11 @@ class DataProcessor:
         for column in feature_cols:
             if column not in df.columns:
                 continue
+            existing_spec = fitted_scalers.get(column)
+            if isinstance(existing_spec, dict):
+                method = str(existing_spec.get("method", "standard"))
+                if method in {"bounded", "robust_winsor", "macro_diff_standard"}:
+                    continue
             col_values = df[column].to_numpy(dtype=np.float64, copy=False)
             train_values = col_values[train_mask]
             finite_mask = np.isfinite(train_values)
@@ -1749,7 +1953,7 @@ class DataProcessor:
             scaler.var_ = np.array([std_val ** 2], dtype=np.float32)
             scaler.scale_ = np.array([std_val], dtype=np.float32)
             scaler.n_features_in_ = 1
-            fitted_scalers[column] = scaler
+            fitted_scalers[column] = {"method": "standard", "scaler": scaler}
             logger.info("   ✅ Re-standardized %s (mean=%.4f, std=%.4f).", column, mean_val, std_val)
         
         return fitted_scalers

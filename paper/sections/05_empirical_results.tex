@@ -1,0 +1,55 @@
+\subsection{Generalization Performance}
+
+The full comparative evaluation is currently in progress across all planned TCN variants (\textit{TCN}, \textit{TCN+Attention}, and \textit{TCN+Fusion}) under a single locked protocol.
+Accordingly, this section uses placeholders pending completion of the final run set and consistency checks.
+
+\begin{table}[!htbp]
+\centering
+\caption{Out-of-Sample Performance (2020--2025) --- Placeholder}
+\label{tab:main_results}
+\scriptsize
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Model} & \textbf{Ret.} & \textbf{SR} & \textbf{DD} & \textbf{Turn.} \\ \midrule
+S\&P 500 & TBD & TBD & TBD & -- \\
+MVO & TBD & TBD & TBD & TBD \\
+\midrule
+\textbf{TCN (Sto.)} & TBD & TBD & TBD & TBD \\
+\textbf{TCN (Det.)} & TBD & TBD & TBD & TBD \\
+\textbf{TCN+Attention (Sto.)} & TBD & TBD & TBD & TBD \\
+\textbf{TCN+Attention (Det.)} & TBD & TBD & TBD & TBD \\
+\textbf{TCN+Fusion (Sto.)} & TBD & TBD & TBD & TBD \\
+\textbf{TCN+Fusion (Det.)} & TBD & TBD & TBD & TBD \\ \bottomrule
+\end{tabular}
+\end{table}
+
+The final version of Table \ref{tab:main_results} will report deterministic and stochastic metrics using the same data window, cost model, and evaluation settings for every variant.
+
+\FloatBarrier
+
+\subsection{Horizon Robustness}
+
+To test horizon robustness, each final candidate will be evaluated on multiple deployment windows using the same checkpoint-selection logic and logging schema.
+
+\begin{table}[!htbp]
+\centering
+\caption{Performance Across Varying Deployment Horizons --- Placeholder}
+\label{tab:horizon_results}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Horizon} & \textbf{Sharpe} & \textbf{Ann. Ret.} & \textbf{Win Rate} \\ \midrule
+1-Year & TBD & TBD & TBD \\
+2-Year & TBD & TBD & TBD \\
+3-Year & TBD & TBD & TBD \\
+6-Year & TBD & TBD & TBD \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\FloatBarrier
+
+\subsection{Regime Analysis}
+
+Regime-level analysis is reserved for the finalized checkpoints and will include explicit event windows (COVID crash, 2022 rate-hike regime, and post-2023 recovery) with aligned deterministic and stochastic summaries.
+
+\textbf{Placeholder note:} all quantitative claims in this section are intentionally deferred until the full TCN variant evaluation matrix is complete.

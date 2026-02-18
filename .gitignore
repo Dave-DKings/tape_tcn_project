@@ -60,3 +60,9 @@ archive/
 --*.csv
 *.tmp
 temp_*.py
+
+# Local bulky artifacts
+master_data.csv
+tcn_results00/
+tcn_fusion_results00/
+DAVID_DUSSEY-CV20260114.pdf

@@ -1,0 +1,126 @@
+TAPE-TCN integrates state-of-the-art sequence modeling with rigorous financial constraints. This section details the state representation, the TCN architecture, the Dirichlet policy head, and the multi-objective TAPE reward system.
+
+\subsection{State Representation}
+
+The agent observes a \textbf{395-dimensional feature vector} at each timestep $t$, denoted as $s_t$. This vector is designed to capture both asset-specific dynamics and systemic risk levels.
+
+\paragraph{Price \& Trend (25 dims)} 
+We utilize OHLCV history transformed into log returns over multiple lookback windows $k \in \{1, 5, 10, 21\}$ days:
+\begin{equation}
+    r_{t,k} = \ln\left(\frac{P_t}{P_{t-k}}\right)
+\end{equation}
+
+\paragraph{Systemic Risk (Eigenvalues)}
+To capture market regime shifts (e.g., correlation breakdowns during crises), we compute the rolling covariance matrix $\Sigma_t \in \mathbb{R}^{N \times N}$ over a 60-day window. We extract the top 3 eigenvalues:
+\begin{equation}
+    \lambda_1, \lambda_2, \lambda_3 = \text{eig}(\Sigma_t)
+\end{equation}
+where $\lambda_1$ serves as a proxy for the ``Market Mode'' (systemic correlation). A spike in $\lambda_1$ indicates that all assets are moving in unison, typically signaling high-risk stress regimes.
+
+\paragraph{Actuarial Features}
+We integrate actuarial risk classification by adapting the \textbf{Chain Ladder Method} \citep{mack1993distribution,taylor2000loss}—traditionally used for insurance reserve estimation—to financial drawdowns. 
+The system classifies current portfolio drawdowns into 4 severity buckets based on depth: Mild ($<5\%$), Moderate ($5-10\%$), Severe ($10-20\%$), and Extreme ($>20\%$). 
+Historical drawdown events are used to build development triangles that track recovery patterns across 30-day periods within each severity class.
+This bucket classification (0-3) is fed directly into the agent's state vector, enabling it to learn severity-dependent risk management strategies.
+
+\begin{figure}[!htbp]
+\centering
+\scriptsize
+\begin{tikzpicture}[
+    node distance=0.8cm and 1.2cm,
+    box/.style={rectangle, draw, fill=blue!10, text width=2cm, align=center, minimum height=0.8cm, font=\tiny},
+    decision/.style={diamond, draw, fill=yellow!20, text width=1.8cm, align=center, minimum height=0.8cm, font=\tiny},
+    bucket/.style={rectangle, draw, rounded corners, text width=1.5cm, align=center, minimum height=0.7cm, font=\tiny},
+    arrow/.style={->,>=stealth,thick}
+]
+
+% Nodes
+\node[box] (data) {Market Data};
+\node[decision, below=of data] (detect) {Drawdown?};
+\node[box, below left=0.8cm and 1cm of detect] (none) {No Feature};
+\node[box, below right=0.8cm and 1cm of detect] (calc) {Calculate DD\%};
+\node[decision, below=of calc] (classify) {Classify};
+\node[bucket, fill=green!20, below left=0.6cm and 0.3cm of classify] (mild) {Bucket 0\\Mild\\$<5\%$};
+\node[bucket, fill=yellow!30, below left=0.1cm and 0.3cm of classify] (mod) {Bucket 1\\Moderate\\$5-10\%$};
+\node[bucket, fill=orange!30, below right=0.1cm and 0.3cm of classify] (sev) {Bucket 2\\Severe\\$10-20\%$};
+\node[bucket, fill=red!30, below right=0.6cm and 0.3cm of classify] (ext) {Bucket 3\\Extreme\\$>20\%$};
+\node[box, below=1.8cm of classify] (state) {Add to\\RL State};
+
+% Arrows
+\draw[arrow] (data) -- (detect);
+\draw[arrow] (detect) -- node[left, font=\tiny] {No} (none);
+\draw[arrow] (detect) -- node[right, font=\tiny] {Yes} (calc);
+\draw[arrow] (calc) -- (classify);
+\draw[arrow] (classify) -- (mild);
+\draw[arrow] (classify) -- (mod);
+\draw[arrow] (classify) -- (sev);
+\draw[arrow] (classify) -- (ext);
+\draw[arrow] (mild) -- (state);
+\draw[arrow] (mod) -- (state);
+\draw[arrow] (sev) -- (state);
+\draw[arrow] (ext) -- (state);
+\draw[arrow] (none) -- (state);
+
+\end{tikzpicture}
+\caption{Actuarial drawdown classification pipeline. Current drawdown depth is mapped to severity buckets, which inform agent risk-taking behavior.}
+\label{fig:actuarial_flow}
+\end{figure}
+
+\subsection{TCN Architecture}
+
+Unlike TCN-based agents that rely on recurrent memory states which often suffer from gradient vanishing over long sequences, we employ a \textbf{Temporal Convolutional Network (TCN)}.
+
+The TCN consists of a stack of causal convolutional layers with exponentially increasing dilation factors $d$. For a sequence input $x$ and filter $f$, the dilated convolution $F$ at element $s$ is defined as:
+\begin{equation}
+    F(s) = (x *_d f)(s) = \sum_{i=0}^{k-1} f(i) \cdot x_{s - d \cdot i}
+\end{equation}
+We use dilation factors $d \in \{1, 2, 4, 8\}$, providing an effective receptive field of approximately 30-60 trading days. This allows the model to detect trend reversals and regime shifts over monthly and quarterly horizons while maintaining training stability.
+
+\subsection{Dirichlet Policy Head}
+
+A fundamental requirement for portfolio optimization is that the action vector $w_t$ (portfolio weights) must lie on the simplex: $\sum_{i=1}^N w_{i,t} = 1$ and $w_{i,t} \ge 0$.
+Standard approaches often output Gaussian actions and apply Softmax, which can distort gradients.
+
+We instead parameterize a \textbf{Dirichlet distribution} directly. The Actor network outputs concentration parameters $\alpha_t \in \mathbb{R}^N$:
+\begin{equation}
+    \alpha_t = \text{softplus}(f_{\theta}(s_t)) + 1 = \ln(1 + \exp(f_{\theta}(s_t))) + 1
+\end{equation}
+The term $+1$ ensures $\alpha_i > 1$, preventing the distribution from becoming bi-modal (which would force extreme 0 or 1 allocations) and encouraging diversity. The action is then sampled:
+\begin{equation}
+    w_t \sim \text{Dir}(\alpha_t)
+\end{equation}
+
+\subsection{TAPE Reward Mechanism}
+
+To solve the sparse reward problem common in financial RL, we use the \textbf{Targeted Adaptive Performance Engine (TAPE)}, a multi-objective reward function:
+\begin{equation}
+    R_t = R_{\text{Base}} + \lambda_{\text{DSR}} \cdot R_{\text{DSR}} + R_{\text{TO}}
+\end{equation}
+
+\subsubsection{Base Return}
+The raw log-return of the portfolio:
+\begin{equation}
+    R_{\text{Base}} = \ln(V_t) - \ln(V_{t-1})
+\end{equation}
+
+\subsubsection{Differential Sharpe Ratio (DSR)}
+To encourage risk-adjusted returns, we use Potential-Based Reward Shaping (PBRS) \citep{ng1999policy}. We define a potential function $\Phi(s_t)$ as the rolling 60-day Sharpe Ratio. The shaped reward is:
+\begin{equation}
+    R_{\text{DSR}} = \gamma \Phi(s_{t+1}) - \Phi(s_t)
+\end{equation}
+where $\gamma$ is the discount factor. We set the scaling coefficient $\lambda_{\text{DSR}} = 5.0$. This provides dense, dense feedback on risk-adjusted performance without altering the optimal policy.
+
+\subsubsection{Turnover Penalty}
+To enforce tax efficiency and reduce transaction costs, we penalize turnover that deviates from a target $\tau = 0.60$ (daily portfolio churn):
+\begin{equation}
+    R_{\text{TO}} = - \beta \cdot \max(0, |\text{TO}_t - \tau| - \delta)^2
+\end{equation}
+where $\text{TO}_t = \sum |w_{t,i} - w_{t-1,i}|$.
+
+\subsection{Drawdown Dual Controller}
+
+We treat the 20\% Maximum Drawdown ($DD_{\text{max}}$) as a hard safety constraint. We solve this using a \textbf{Lagrangian relaxation}. A dual variable (Lagrange multiplier) $\lambda$ is updated online via gradient ascent:
+\begin{equation}
+    \lambda_{k+1} = \max(0, \lambda_k + \eta \cdot (DD_{\text{current}} - 0.20))
+\end{equation}
+where $k$ is the episode index and $\eta$ is the dual learning rate. If the agent breaches the 20\% limit, $\lambda$ increases, heavily penalizing the reward function in future episodes until the policy adapts to respect the safety barrier.

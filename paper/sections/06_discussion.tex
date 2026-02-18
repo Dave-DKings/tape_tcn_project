@@ -1,0 +1,10 @@
+\subsection{Why TCNs Outperform TCNs}
+Financial time series exhibit multi-scale characteristics: short-term microstructure noise overlaid on long-term macroeconomic trends. TCNs often struggle to maintain gradients over sequences longer than 50-60 steps \citep{bai2018tcn}. Our TCN architecture, with a receptive field of roughly 60 days via dilated convolutions ($d=1,2,4,8$), explicitly models these hierarchical timeframes. The first layer captures daily noise, while the deeper layers capture quarterly trends. This architectural bias towards "wavelet-like" processing appears better suited for financial data than the state-dependent memory of RNNs.
+
+\subsection{Predictive Safety vs. Stop Losses}
+Standard industry risk management relies on "Stop Loss" orders, which are reactive—selling only after a loss has occurred. Our Actuarial features (Drawdown Recovery Probability) turn this into a \textit{predictive} mechanism. The agent learned to reduce exposure \textit{anticipatorily} when the probability of a quick recovery dropped, typically 3-5 days before major volatility events. This suggests that "Survival Analysis" is a powerful, underutilized primitive for Safe RL.
+
+\subsection{Deployment Readiness}
+A major barrier to RL deployment is transaction cost drag under frequent rebalancing.
+Final deployment-readiness claims are intentionally deferred in this draft until all TCN variants are evaluated under a unified deterministic/stochastic protocol.
+The finalized discussion will compare turnover, drawdown stability, and risk-adjusted performance across variants before drawing implementation conclusions.

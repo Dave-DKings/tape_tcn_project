@@ -83,6 +83,23 @@ FUNDAMENTAL_FEATURES_CONFIG = {
     "staleness_days_normalizer": 90.0
 }
 
+# Phase-1/2 feature pruning policy:
+# - remove strongly redundant trend/oscillator channels
+# - remove binary beta flags (continuous beta/rank already available)
+# - reduce redundant policy-rate level channels (prefer diff/zscore dynamics)
+PHASE12_REDUNDANT_FEATURES_TO_DISABLE = [
+    "EMA_12",
+    "EMA_26",
+    "BBM_20_2.0",
+    "SMA_50",
+    "STOCHk_14_3_3",
+    "WILLR_14",
+    "HighBeta_Flag",
+    "LowBeta_Flag",
+    "EFFR_level",
+    "FEDFUNDS_level",
+]
+
 FEATURES_TO_DISABLE = [
     "BAMLC0A0CMEY_level",
     "BAMLC0A0CMEY_diff",
@@ -117,7 +134,7 @@ FEATURES_TO_DISABLE = [
     "FedBalanceSheet_diff",
     "ON_RRP_level",
     "ON_RRP_diff",
-]
+] + PHASE12_REDUNDANT_FEATURES_TO_DISABLE
 
 FEATURE_SELECTION_CONFIG = {
     "disable_features": True,
@@ -150,13 +167,17 @@ CROSS_SECTIONAL_FEATURES_CONFIG = {
         "RollingVolatility_21d",
         "RSI_14"
     ],
+    # Keep policy surface smooth; avoid extra binary channels by default.
+    "include_beta_flags": False,
+    "high_beta_threshold": 1.2,
+    "low_beta_threshold": 0.8,
 }
 
 FRED_API_KEY = "da9d24dd8de4f924dcbc8416e539b4ef" # User's actual FRED API Key
 FRED_SERIES_CONFIG = [
-    {"code": "EFFR", "name": "EFFR", "freq": "d", "calc": ["level", "diff", "zscore"]},
+    {"code": "EFFR", "name": "EFFR", "freq": "d", "calc": ["diff", "zscore"]},
     {"code": "SOFR", "name": "SOFR", "freq": "d", "calc": ["level", "diff"]},
-    {"code": "FEDFUNDS", "name": "FEDFUNDS", "freq": "m", "calc": ["level", "diff", "zscore"]},
+    {"code": "FEDFUNDS", "name": "FEDFUNDS", "freq": "m", "calc": ["diff", "zscore"]},
     {"code": "DGS10", "name": "DGS10", "freq": "d", "calc": ["level", "diff", "slope"]},
     {"code": "DGS2", "name": "DGS2", "freq": "d", "calc": ["level", "diff"]},
     {"code": "T10Y2Y", "name": "T10Y2Y", "freq": "d", "calc": ["level"]},
@@ -170,11 +191,31 @@ FRED_SERIES_CONFIG = [
     {"code": "UNRATE", "name": "UNRATE", "freq": "m", "calc": ["level", "diff", "zscore"]},
     {"code": "PAYEMS", "name": "PAYEMS", "freq": "m", "calc": ["level", "diff", "yoy"]},
     {"code": "INDPRO", "name": "INDPRO", "freq": "m", "calc": ["level", "diff", "yoy"]},
-    {"code": "NAPM", "name": "ISM_MAN_PMI", "freq": "m", "calc": ["level", "diff"]},
     {"code": "BAMLC0A4CBBBEY", "name": "IG_Credit", "freq": "d", "calc": ["level", "diff", "zscore"]},
     {"code": "BAMLH0A0HYM2", "name": "HY_Credit", "freq": "d", "calc": ["level", "diff", "zscore"]},
-    {"code": "MOVEINDEX", "name": "MOVE", "freq": "d", "calc": ["level", "zscore"]},
     {"code": "VIXCLS", "name": "VIX", "freq": "d", "calc": ["level", "zscore"]},
+]
+
+# Explicit global-context routing for structured observations in Phase 1/2.
+PHASE12_GLOBAL_FEATURE_COLUMNS = [
+    "YieldCurve_Spread",
+    "YieldCurve_Inverted_Flag",
+    "Regime_Breadth_Positive",
+]
+
+PHASE12_GLOBAL_FEATURE_PREFIXES = [
+    "Covariance_Eigenvalue_",
+    "YieldCurve_",
+    "EFFR_",
+    "SOFR_",
+    "FEDFUNDS_",
+    "DGS",
+    "T10Y",
+    "TIPS",
+    "BreakevenInf",
+    "IG_Credit_",
+    "HY_Credit_",
+    "VIX_",
 ]
 
 MACRO_DATA_CONFIG = {
@@ -297,6 +338,8 @@ PHASE1_CONFIG = {
         "initial_balance": 100000.0,
         "transaction_cost_pct": 0.001,
         "structured_observation": True,
+        "global_feature_columns": copy.deepcopy(PHASE12_GLOBAL_FEATURE_COLUMNS),
+        "global_feature_prefixes": copy.deepcopy(PHASE12_GLOBAL_FEATURE_PREFIXES),
         "reward_type": "advanced_tape",  # Three-component TAPE reward
         "max_steps_per_episode": None,  # Episode horizon managed dynamically during training
         "done_on_balance_threshold_pct": 0.5,  # PHASE 1: Increased from 0.2 to 0.5 for exploration
@@ -305,10 +348,10 @@ PHASE1_CONFIG = {
         "initial_cash_position": 0.05,
         "tape_terminal_scalar": 10.0,
         "tape_terminal_clip": 10.0,
-        "target_turnover": 0.50,  # Turnover ceiling: 50% per step (archive avg ~0.54)
-        "turnover_penalty_scalar": 1.5,
+        "target_turnover": 0.40,  # Tightened ceiling to reduce churn and improve risk-adjusted stability
+        "turnover_penalty_scalar": 2.0,
         "turnover_target_band": 0.20,
-        "dsr_scalar": 5.0,  # Differential Sharpe Ratio multiplier
+        "dsr_scalar": 3.0,  # Lowered to reduce reward dominance/noise
         "concentration_penalty_scalar": 2.0,
         "concentration_target_hhi": 0.14,
         "top_weight_penalty_scalar": 1.5,
@@ -318,7 +361,7 @@ PHASE1_CONFIG = {
         "intra_step_tape_delta_enabled": True,
         "intra_step_tape_delta_window": 60,
         "intra_step_tape_delta_min_history": 20,
-        "intra_step_tape_delta_beta": 0.10,
+        "intra_step_tape_delta_beta": 0.03,
         "intra_step_tape_delta_clip": 0.20,
         "dd_regime_scaling": {
             "enabled": True,
@@ -399,13 +442,12 @@ PHASE1_CONFIG = {
         "evaluation_mode": "mode",  # ✅ RECOMMENDED: Shows true learned policy
         
         # PPO Algorithm parameters
-        # NOTE: target_kl=0.0 disables KL early-stopping (matching archive runs
-        # that achieved TAPE 0.70-0.97 with KL values up to 0.53).
+        # Stabilized PPO regime for better out-of-sample Sharpe retention.
         "ppo_params": {
             "gamma": 0.99, "gae_lambda": 0.9, "policy_clip": 0.15,
-            "entropy_coef": 0.01, "vf_coef": 0.5, "num_ppo_epochs": 10,
-            "batch_size_ppo": 252, "actor_lr": 0.00005, "critic_lr": 0.0005,
-            "max_grad_norm": 0.5, "value_clip": 0.2, "target_kl": 0.0
+            "entropy_coef": 0.01, "vf_coef": 0.5, "num_ppo_epochs": 6,
+            "batch_size_ppo": 252, "actor_lr": 0.00003, "critic_lr": 0.0005,
+            "max_grad_norm": 0.5, "value_clip": 0.2, "target_kl": 0.02
         },
     },
     #================================================
@@ -489,18 +531,18 @@ PHASE1_CONFIG = {
         # Actor LR schedule (canonical across project).
         # Starts conservative, then decays further for stability.
         "actor_lr_schedule": [
-            {"threshold": 0, "lr": 0.00005},
-            {"threshold": 40_000, "lr": 0.00003},
+            {"threshold": 0, "lr": 0.00003},
+            {"threshold": 40_000, "lr": 0.00002},
             {"threshold": 70_000, "lr": 0.00001},
         ],
 
         # Turnover curriculum matching 2.0 → 1.75 → 1.50 → 1.25 request
         "turnover_penalty_curriculum": {
-            0: 0.55,
-            30_000: 1.00,
-            60_000: 1.25,
-            90_000: 1.50,
-            120_000: 1.75,
+            0: 0.75,
+            30_000: 1.25,
+            60_000: 1.50,
+            90_000: 1.75,
+            120_000: 2.00,
         },
     },
 }
@@ -541,16 +583,18 @@ PHASE2_CONFIG = {
     "environment_params": {
         "initial_balance": 100000.0, "transaction_cost_pct": 0.001,
         "structured_observation": True,
+        "global_feature_columns": copy.deepcopy(PHASE12_GLOBAL_FEATURE_COLUMNS),
+        "global_feature_prefixes": copy.deepcopy(PHASE12_GLOBAL_FEATURE_PREFIXES),
         "reward_type": "advanced_tape", # Use TAPE reward system
         "truncated_gaussian_lambda": 0.2,
         "max_steps_per_episode": 252,
         "done_on_balance_threshold_pct": 0.5,
         "initial_allocation_mode": "equal_assets_with_min_cash",
         "initial_cash_position": 0.05,
-        "target_turnover": 0.50,  # Turnover ceiling: 50% per step
-        "turnover_penalty_scalar": 1.5,
+        "target_turnover": 0.40,  # Tightened ceiling to reduce churn
+        "turnover_penalty_scalar": 2.0,
         "turnover_target_band": 0.20,
-        "dsr_scalar": 5.0,  # Differential Sharpe Ratio multiplier
+        "dsr_scalar": 3.0,  # Lowered to reduce reward volatility
         "concentration_penalty_scalar": 2.0,
         "concentration_target_hhi": 0.14,
         "top_weight_penalty_scalar": 1.5,
@@ -560,7 +604,7 @@ PHASE2_CONFIG = {
         "intra_step_tape_delta_enabled": True,
         "intra_step_tape_delta_window": 60,
         "intra_step_tape_delta_min_history": 20,
-        "intra_step_tape_delta_beta": 0.10,
+        "intra_step_tape_delta_beta": 0.03,
         "intra_step_tape_delta_clip": 0.20,
         "dd_regime_scaling": {
             "enabled": True,
@@ -654,7 +698,7 @@ PHASE2_CONFIG = {
         "ppo_params": {
             "gamma": 0.99, "gae_lambda": 0.9, "policy_clip": 0.15,
             "entropy_coef": 0.01, "vf_coef": 0.5, "num_ppo_epochs": 3,
-            "batch_size_ppo": 256, "actor_lr": 0.00005, "critic_lr": 0.0005,
+            "batch_size_ppo": 256, "actor_lr": 0.00003, "critic_lr": 0.0005,
             "max_grad_norm": 0.5, "value_clip": 0.2, "target_kl": 0.03
         },
     },
@@ -694,17 +738,17 @@ PHASE2_CONFIG = {
 
         # Turnover penalty schedule to match Phase 1 discipline
         "turnover_penalty_curriculum": {
-            0: 0.55,
-            30_000: 1.00,
-            60_000: 1.25,
-            90_000: 1.50,
-            120_000: 1.75,
+            0: 0.75,
+            30_000: 1.25,
+            60_000: 1.50,
+            90_000: 1.75,
+            120_000: 2.00,
         },
 
         # Actor LR decay schedule (critic stays constant)
         "actor_lr_schedule": [
-            {"threshold": 0, "lr": 0.00005},
-            {"threshold": 40_000, "lr": 0.00003},
+            {"threshold": 0, "lr": 0.00003},
+            {"threshold": 40_000, "lr": 0.00002},
             {"threshold": 70_000, "lr": 0.00001},
         ],
 

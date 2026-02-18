@@ -1,0 +1,199 @@
+%=============================================================================
+% TAPE-TCN Research Paper - Professional Two-Column Format
+% Conference/Journal Style: IEEE/ACM Template
+% Last Updated: \today
+%=============================================================================
+
+\documentclass[10pt,twocolumn]{article}
+
+%-----------------------------------------------------------------------------
+% Page Layout & Geometry
+%-----------------------------------------------------------------------------
+\usepackage[
+    letterpaper,           % US Letter (8.5" x 11")
+    margin=0.75in,         % 0.75 inch margins all around (narrower for more space)
+    top=0.75in,
+    bottom=0.75in,
+    columnsep=0.25in       % Space between columns
+]{geometry}
+
+%-----------------------------------------------------------------------------
+% Typography & Fonts
+%-----------------------------------------------------------------------------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{times}              % Times New Roman font (professional standard)
+\usepackage{microtype}          % Improved typography (character spacing)
+
+%-----------------------------------------------------------------------------
+% Mathematics
+%-----------------------------------------------------------------------------
+\usepackage{amsmath}            % Advanced math environments
+\usepackage{amssymb}            % Math symbols (e.g., \mathbb{R})
+\usepackage{amsthm}             % Theorem environments
+\usepackage{bm}                 % Bold math (\bm{x} for bold vectors)
+
+%-----------------------------------------------------------------------------
+% Graphics & Figures
+%-----------------------------------------------------------------------------
+\usepackage{graphicx}           % Include images
+\usepackage{caption}            % Customizable captions
+\usepackage{subcaption}         % Subfigures (a), (b), (c)
+
+%-----------------------------------------------------------------------------
+% TikZ for Diagrams
+%-----------------------------------------------------------------------------
+\usepackage{tikz}               % Drawing diagrams
+\usetikzlibrary{shapes,arrows,positioning,calc}
+
+% Figure placement settings (reduce whitespace)
+\setlength{\textfloatsep}{10pt plus 2pt minus 2pt}
+\setlength{\floatsep}{10pt plus 2pt minus 2pt}
+\setlength{\intextsep}{10pt plus 2pt minus 2pt}
+
+%-----------------------------------------------------------------------------
+% Tables
+%-----------------------------------------------------------------------------
+\usepackage{booktabs}           % Professional tables (\toprule, \midrule, \bottomrule)
+\usepackage{multirow}           % Multi-row cells
+\usepackage{array}              % Enhanced column formatting
+\usepackage{placeins}           % Float barriers (\FloatBarrier)
+
+%-----------------------------------------------------------------------------
+% Algorithms & Code
+%-----------------------------------------------------------------------------
+\usepackage{algorithm}          % Algorithm float environment
+\usepackage{algpseudocode}      % Pseudocode (\State, \For, \While, etc.)
+\usepackage{listings}           % Code listings (if needed)
+
+% Algorithm styling
+\algrenewcommand\algorithmiccomment[1]{\hfill\textit{// #1}}
+
+%-----------------------------------------------------------------------------
+% Citations & References
+%-----------------------------------------------------------------------------
+\usepackage{natbib}             % Natural sciences citation style
+\setcitestyle{numbers,square}   % [1,2,3] style citations
+
+%-----------------------------------------------------------------------------
+% Cross-References & Links (Load LAST)
+%-----------------------------------------------------------------------------
+\usepackage{url}                % Format URLs
+\usepackage[
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue,
+    breaklinks=true
+]{hyperref}                     % Hyperlinks (must be loaded last)
+\usepackage[capitalize]{cleveref} % Smart references (e.g., "Figure 3" instead of "fig. 3")
+
+%-----------------------------------------------------------------------------
+% Color (Remove before final submission if required)
+%-----------------------------------------------------------------------------
+\usepackage{xcolor}
+% Define custom colors if needed
+% \definecolor{darkblue}{RGB}{0,51,102}
+
+%-----------------------------------------------------------------------------
+% Custom Commands & Macros
+%-----------------------------------------------------------------------------
+% Mathematical notation shortcuts
+\newcommand{\R}{\mathbb{R}}                    % Real numbers
+\newcommand{\E}{\mathbb{E}}                    % Expectation
+\newcommand{\Prob}{\mathbb{P}}                 % Probability
+\newcommand{\vect}[1]{\bm{#1}}                 % Bold vectors
+\newcommand{\mat}[1]{\bm{#1}}                  % Bold matrices
+
+% Acronyms (define once, use throughout)
+\newcommand{\DRL}{DRL}              % Deep Reinforcement Learning
+\newcommand{\TCN}{TCN}              % Temporal Convolutional Network
+\newcommand{\TAPE}{TAPE}            % Terminal Aggregate Performance Enhancement
+\newcommand{\PPO}{PPO}              % Proximal Policy Optimization
+\newcommand{\MDP}{MDP}              % Markov Decision Process
+
+%-----------------------------------------------------------------------------
+% Title & Authors
+%-----------------------------------------------------------------------------
+\title{
+    \Large\textbf{TAPE-TCN: Horizon-Agnostic Portfolio Optimization \\
+    via Temporal Convolutional Networks and \\
+    Actuarial Drawdown Control}
+}
+
+\author{
+    \textbf{Research Team} \\
+    Department/Institution \\
+    \texttt{contact@email.com}
+}
+
+\date{}  % Remove date for cleaner look
+
+%=============================================================================
+% DOCUMENT BEGINS
+%=============================================================================
+
+\begin{document}
+
+%-----------------------------------------------------------------------------
+% Title, Abstract (Spanning Both Columns)
+%-----------------------------------------------------------------------------
+% Use \twocolumn[] to make title and abstract span both columns
+\twocolumn[
+  \begin{@twocolumnfalse}
+    \maketitle
+    
+    \begin{abstract}
+        \input{sections/00_abstract}
+    \end{abstract}
+    
+    % Add small vertical space after abstract
+    \vspace{0.5cm}
+  \end{@twocolumnfalse}
+]
+
+%-----------------------------------------------------------------------------
+% Two-Column Content Begins Here
+%-----------------------------------------------------------------------------
+
+\section{Introduction}
+\label{sec:intro}
+\input{sections/01_introduction}
+
+\section{Related Work}
+\label{sec:related}
+\input{sections/02_related_work}
+
+\section{Methodology}
+\label{sec:method}
+\input{sections/03_methodology}
+
+\section{Experimental Setup}
+\label{sec:setup}
+\input{sections/04_experimental_setup}
+
+\section{Empirical Results}
+\label{sec:results}
+\input{sections/05_empirical_results}
+
+\section{Discussion}
+\label{sec:discussion}
+\input{sections/06_discussion}
+
+\section{Conclusion}
+\label{sec:conclusion}
+\input{sections/07_conclusion}
+
+%-----------------------------------------------------------------------------
+% Acknowledgments (Optional - uncomment if needed)
+%-----------------------------------------------------------------------------
+% \section*{Acknowledgments}
+% This work was supported by...
+
+%-----------------------------------------------------------------------------
+% References
+%-----------------------------------------------------------------------------
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

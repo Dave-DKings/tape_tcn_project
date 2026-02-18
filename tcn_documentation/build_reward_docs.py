@@ -1,0 +1,266 @@
+"""
+Reward System Documentation Builder
+Builds comprehensive TAPE reward system documentation
+"""
+import json
+
+def build_reward_docs():
+    """Build comprehensive TAPE reward system documentation"""
+    
+    cells = []
+    
+    # === TITLE ===
+    cells.append({
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": ["# TAPE Reward System - Comprehensive Technical Reference\n", "\n",
+                  "**Version**: 2.0 (Expanded February 2026)\n", "\n", 
+                  "**Scope**: Complete technical documentation of the TAPE (Terminal Aggregate Performance Enhancement) reward system used in the project, including mathematical formulations and code mapping.\n"]
+    })
+    
+    # === TABLE OF CONTENTS ===
+    cells.append({
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": [
+            "## Table of Contents\n",
+            "\n",
+            "1. [Introduction and Philosophy](#section1)\n",
+            "2. [The Three-Component Step Reward](#section2)\n",
+            "3. [Terminal Tape Utility](#section3)\n",
+            "4. [Active vs. Reserved Components](#section4)\n",
+            "5. [Code Implementation Map](#section5)\n",
+            "6. [Configuration Guide](#section6)\n",
+            "7. [Mathematical Notation](#section7)\n"
+        ]
+    })
+    
+    # === SECTION 1: Introduction ===
+    cells.append({
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": [
+            "## 1. Introduction and Philosophy <a id='section1'></a>\n",
+            "\n",
+            "The **Terminal Aggregate Performance Enhancement (TAPE)** system is designed to solve a fundamental challenge in portfolio reinforcement learning: the misalignment between *step-wise* rewards (daily returns) and *episode-wise* objectives (Sharpe ratio, Drawdown, Turnover).\n",
+            "\n",
+            "### Core Philosophy\n",
+            "\n",
+            "1.  **Dense Step Signals**: Agents need frequent feedback to learn. We provide this via a multi-component daily reward signal (Net Return + DSR + Turnover).\n",
+            "2.  **Holistic Terminal Assessment**: Financial performance is not just accumulated return. It includes risk-adjusted metrics (Sharpe/Sortino) and behavioral constraints (Turnover). The **Terminal TAPE Bonus** acts as a final \"report card\" that provides a strong gradient toward these holistic goals.\n",
+            "3.  **Behavioral Shaping**: Instead of hard constraints (which break gradients), we use *proximity rewards* (e.g., for turnover) to guide the agent into desirable behavioral bands.\n"
+        ]
+    })
+
+    # === SECTION 2: Three-Component Step Reward ===
+    cells.append({
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": [
+            "## 2. The Three-Component Step Reward <a id='section2'></a>\n",
+            "\n",
+            "The step-level reward $R_t$ is composed of three active components:\n",
+            "\n",
+            "$$\n",
+            "R_t = R_t^{\\text{base}} + R_t^{\\text{DSR}} + R_t^{\\text{turnover}}\n",
+            "$$\n",
+            "\n",
+            "### 2.1 Component 1: Base Reward (Net Return)\n",
+            "\n",
+            "This component incentivizes raw capital growth, net of transaction costs.\n",
+            "\n",
+            "$$\n",
+            "R_t^{\\text{base}} = \\text{Clip}(\\text{NetReturn}_t \\times 100, -10, 10)\n",
+            "$$\n",
+            "\n",
+            "Where:\n",
+            "- $\\text{NetReturn}_t$: Portfolio return after deducting transaction costs.\n",
+            "- $100$: Scaling factor to bring magnitude to $\\approx [-2, 2]$ range.\n",
+            "- `enable_base_reward`: Config flag to toggle this component.\n",
+            "\n",
+            "### 2.2 Component 2: Differential Sharpe Ratio (DSR)\n",
+            "\n",
+            "Based on Moody & Saffell (2001), DSR provides a step-by-step update that maximizes the Sharpe Ratio. We use it as a **Potential-Based Reward Shaping (PBRS)** mechanism:\n",
+            "\n",
+            "$$\n",
+            "R_t^{\\text{shaped}} = R_t + \\gamma \\Phi(S_{t+1}) - \\Phi(S_t)\n",
+            "$$\n",
+            "\n",
+            "In our implementation:\n",
+            "$$\n",
+            "R_t^{\\text{DSR}} = \\lambda_{\\text{DSR}} \\cdot (\\gamma \\cdot S_{t}^{\\text{rolling}} - S_{t-1}^{\\text{rolling}})\n",
+            "$$\n",
+            "\n",
+            "Where:\n",
+            "- $S_t^{\\text{rolling}}$: Sharpe ratio calculated over a rolling window (`dsr_window=60`).\n",
+            "- $\\lambda_{\\text{DSR}}$: Scalar (`dsr_scalar=5.0`) to balance this signal with returns.\n",
+            "- $\\gamma$: Discount factor (`gamma=0.99`).\n",
+            "\n",
+            "**Goal**: Encourage consistency and low volatility, not just raw return.\n",
+            "\n",
+            "### 2.3 Component 3: Turnover Proximity Reward\n",
+            "\n",
+            "To enforce a specific trading frequency (e.g., \"active but not churned\"), we reward the agent for keeping turnover $\\tau_t$ close to a target $\\tau^*$.\n",
+            "\n",
+            "$$\n",
+            "\\text{Deviation}_t = |\\tau_t - \\tau^*|\n",
+            "$$\n",
+            "\n",
+            "We define a tolerance band $\\delta = \\tau^* \\cdot \\text{band\\_fraction}$.\n",
+            "\n",
+            "- **Inside Band** ($|\\tau_t - \\tau^*| \\le \\delta$): Positive reward scaling with proximity.\n",
+            "  $$R_t^{\\text{turnover}} = \\lambda_{\\text{TO}} \\cdot (1 - \\frac{\\text{Deviation}_t}{\\delta})$$\n",
+            "- **Outside Band**: Negative penalty scaling with excess deviation.\n",
+            "  $$R_t^{\\text{turnover}} = -\\lambda_{\\text{TO}} \\cdot (\\frac{\\text{Deviation}_t}{\\delta} - 1)$$\n",
+            "\n",
+            "Where:\n",
+            "- $\\lambda_{\\text{TO}}$: `turnover_penalty_scalar` (default 5.0).\n",
+            "\n",
+            "**Goal**: Guide agent to a specific location on the active-passive spectrum."
+        ]
+    })
+    
+    # === SECTION 3: Terminal TAPE Utility ===
+    cells.append({
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": [
+            "## 3. Terminal TAPE Utility <a id='section3'></a>\n",
+            "\n",
+            "At the end of an episode, we calculate a holistic **TAPE Score** ($0.0 - 1.0$) based on multiple metrics:\n",
+            "\n",
+            "1.  **Sharpe Ratio**\n",
+            "2.  **Sortino Ratio**\n",
+            "3.  **Max Drawdown**\n",
+            "4.  **Turnover**\n",
+            "5.  **Skewness**\n",
+            "\n",
+            "Each metric $x_i$ is mapped to a utility $U_i(x_i)$ via a **Skewed Utility Function**:\n",
+            "\n",
+            "$$\n",
+            "U(x; \\mu, \\sigma^-, \\sigma^+) = \\exp\\left(-\\frac{(x - \\mu)^2}{2\\sigma^2}\\right)\n",
+            "$$\n",
+            "\n",
+            "Where $\\sigma = \\sigma^-$ if $x < \\mu$ and $\\sigma = \\sigma^+$ if $x > \\mu$. This allows us to be punitive on downside (e.g., low Sharpe) but permissive on upside.\n",
+            "\n",
+            "**Final Terminal Bonus**:\n",
+            "$$\n",
+            "R_T^{\\text{bonus}} = \\text{Clip}(\\text{TAPE Score} \\times \\Lambda_{\\text{term}}, -C, C)\n",
+            "$$\n",
+            "\n",
+            "Where:\n",
+            "- $\\Lambda_{\\text{term}}$: `tape_terminal_scalar` (default 1000.0).\n",
+            "- $C$: `tape_terminal_clip` (default 5.0).\n",
+            "\n",
+            "This bonus acts as a powerful final gradient to align the agent's long-term behavior with complex preferences."
+        ]
+    })
+    
+    # === SECTION 4: Active vs. Reserved Components ===
+    cells.append({
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": [
+            "## 4. Active vs. Reserved Components <a id='section4'></a>\n",
+            "\n",
+            "### Current Status\n",
+            "\n",
+            "| Component | Status | Config Key | Description |\n",
+            "|-----------|--------|------------|-------------|\n",
+            "| **Base Reward** | ✅ **Active** | `enable_base_reward` | Net return contribution |\n",
+            "| **DSR Component** | ✅ **Active** | `dsr_scalar` | Sharpe shaping |\n",
+            "| **Turnover** | ✅ **Active** | `target_turnover` | Proximity target |\n",
+            "| **Drawdown Controller** | ⏸️ **Inactive** | `drawdown_constraint` | **Reserved**. Code initializes params but does not currently sum this term in `_get_reward`. |\n",
+            "\n",
+            "### Note on Drawdown Controller\n",
+            "The environment code (`environment_tape_rl.py`) contains logic to initialize a Dual-Variable Drawdown Controller (Lagrangian method). However, in the current `_get_reward` function, this penalty term is **not added** to the final reward sum. It is reserved for future constraint-based experiments."
+        ]
+    })
+    
+    # === SECTION 5: Code Implementation Map ===
+    cells.append({
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": [
+            "## 5. Code Implementation Map <a id='section5'></a>\n",
+            "\n",
+            "### `src/environment_tape_rl.py`\n",
+            "- `_get_reward()`: The master function summing components.\n",
+            "  - **Base**: `base_reward = portfolio_return * 100`\n",
+            "  - **DSR**: `dsr_component` using rolling buffer `self.dsr_history`\n",
+            "  - **Turnover**: `turnover_reward` logic with `deviation` and `band_fraction`\n",
+            "- `step()`: Calculates terminal metrics and applies `tape_score` bonus.\n",
+            "\n",
+            "### `src/reward_utils.py`\n",
+            "- `calculate_sharpe_ratio_dsr()`: Optimized incremental Sharpe calculation.\n",
+            "- `calculate_tape_score()`: Aggregates metrics using profile weights.\n",
+            "- `skewed_utility_function()`: Implements the asymmetric Gaussian utility."
+        ]
+    })
+
+    # === SECTION 6: Configuration Guide ===
+    cells.append({
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": [
+            "## 6. Configuration Guide <a id='section6'></a>\n",
+            "\n",
+            "Key parameters in `src/config.py` (`environment_params`):\n",
+            "\n",
+            "```python\n",
+            "\"environment_params\": {\n",
+            "    \"reward_system\": \"tape\",           # Enable this system\n",
+            "    \"dsr_window\": 60,                  # Rolling window for Sharpe\n",
+            "    \"dsr_scalar\": 5.0,                 # Strength of Sharpe shaping\n",
+            "    \n",
+            "    # Turnover Control\n",
+            "    \"target_turnover\": 0.76,           # Target daily turnover (76%)\n",
+            "    \"turnover_target_band\": 0.20,      # Tolerance ±20%\n",
+            "    \"turnover_penalty_scalar\": 5.0,    # Strength of proximity reward\n",
+            "    \n",
+            "    # Terminal\n",
+            "    \"tape_terminal_scalar\": 1000.0,    # Final bonus multiplier\n",
+            "    \"tape_terminal_clip\": 5.0,         # Clip bonus magnitude\n",
+            "    \n",
+            "    # Base\n",
+            "    \"enable_base_reward\": True         # Include raw returns\n",
+            "}\n",
+            "```"
+        ]
+    })
+    
+    # === SECTION 7: Notation ===
+    cells.append({
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": [
+            "## 7. Mathematical Notation <a id='section7'></a>\n",
+            "\n",
+            "- $R_t$: Total reward at step $t$\n",
+            "- $\\tau_t$: Portfolio turnover at step $t$\n",
+            "- $S_t$: Rolling Sharpe ratio\n",
+            "- $\\gamma$: Discount factor (0.99)\n",
+            "- $\\mu, \\sigma$: Utility function parameters\n",
+            "- $\\lambda$: Scalar coefficients matching code config"
+        ]
+    })
+
+    # Validate output
+    notebook = {
+        "cells": cells,
+        "metadata": {
+            "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+            "language_info": {"name": "python"}
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5
+    }
+    
+    return notebook
+
+if __name__ == "__main__":
+    nb = build_reward_docs()
+    output_path = r"c:\Users\Owner\new_project\adaptive_portfolio_rl\tcn_documentation\01_reward_system_full.ipynb"
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(nb, f, indent=1)
+    print(f"Created reward docs with {len(nb['cells'])} cells")

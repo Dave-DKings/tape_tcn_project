@@ -1,0 +1,21 @@
+The application of Reinforcement Learning (RL) to portfolio management faces a ``black box'' dilemma: while deep models can uncover complex arbitrage opportunities, they often fail to provide the safety guarantees required for institutional capital. 
+Traditional methods like Mean-Variance Optimization (MVO) \citep{markowitz1952portfolio} offer mathematical rigor but rely on backward-looking covariance assumptions that break down during crises. 
+Conversely, end-to-end RL agents can adapt to new regimes but frequently suffer from excessive turnover, overfitting to specific backtest lengths, and catastrophic drawdowns when market dynamics shift unexpectedly.
+
+We introduce \textbf{TAPE-TCN}, a framework designed to bridge this gap by enforcing actuarial discipline within a deep learning agent. Our system is built on seven core pillars:
+
+\begin{enumerate}
+    \item \textbf{TCN Backbone}: Replacing recurrent sequence models with dilated Temporal Convolutional Networks \citep{bai2018tcn} to capture long-range dependencies (60-90 days) without gradient vanishing.
+    \item \textbf{TAPE Reward}: A three-component shaping mechanism (Net Return, Differential Sharpe, Turnover Penalty) that guides learning through sparse environments.
+    \item \textbf{Actuarial Intelligence}: Integrating survival analysis features (e.g., drawdown recovery probability) directly into the state space.
+    \item \textbf{Drawdown Dual Controller}: A Lagrangian constraint mechanism that treats the 20\% drawdown limit as a hard barrier.
+    \item \textbf{Dirichlet Policy}: Using a simplex-native distribution for actions, ensuring valid weights by design.
+    \item \textbf{Eigen-Feature Engineering}: Dynamically monitoring systemic risk via covariance matrix eigenvalues.
+    \item \textbf{Horizon Robustness}: Explicitly verifying performance across variable episode lengths (1-6 years).
+\end{enumerate}
+
+We evaluate the system on a diversified US equity universe plus cash over a 15-year period.
+Training occurs from 2011--2019, while testing is conducted on a true out-of-sample window from \textbf{2020--2025}, which includes the COVID-19 crash and the 2022 inflationary bear market.
+Because the full TCN variant sweep is still running, this paper version intentionally uses placeholder result statements in the empirical sections; finalized comparative statistics will be inserted once all variants are evaluated under identical protocols.
+
+The rest of this paper details the methodology (Section \ref{sec:method}), experimental setup (Section \ref{sec:setup}), and empirical results (Section \ref{sec:results}), followed by a discussion on the implications of ``Horizon-Agnostic'' RL (Section \ref{sec:discussion}).

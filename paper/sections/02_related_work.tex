@@ -1,0 +1,11 @@
+\subsection{Deep Reinforcement Learning in Finance}
+Early applications of DRL to portfolio management focused on maximizing log returns using standard architectures. \citet{jiang2017deep} introduced the Ensemble of Identical Independent Evaluators (EIIE), a dedicated topology for portfolio management that inputs a tensor of asset prices and outputs weights directly. \citet{liang2018adversarial} extended this with adversarial training to improve robustness. However, these early works often neglected transaction costs and realistic constraints, leading to strategies that were profitable in theory but unimplementable in practice due to excessive turnover.
+
+\subsection{Reward Shaping}
+The sparsity of financial reward signals makes learning difficult. \citet{ng1999policy} proved that Potential-Based Reward Shaping (PBRS) is the only form of shaping that preserves the optimal policy. \citet{devidze2022exploration} demonstrated the effectiveness of PBRS in sparse reward settings. In the financial domain, \citet{xu2021portfolio} explored various reward functions but did not fully leverage the PBRS framework for risk-adjusted metrics like the Sharpe Ratio, which we adopt in this work.
+
+\subsection{Sequence Modeling: TCN vs. TCN}
+Recurrent Neural Networks (RNNs) and Long Short-Term Memory (TCN) networks have been the standard for time-series forecasting. However, \citet{bai2018tcn} demonstrated that Temporal Convolutional Networks (TCNs) often outperform RNNs in sequence modeling tasks. TCNs allow for massive parallelism, stable gradients, and flexible receptive fields via dilated convolutions. Our work validates this finding in the financial domain, showing that TCNs capture multi-scale market dynamics more effectively than TCNs.
+
+\subsection{Actuarial Risk Measures}
+Traditional finance relies on Variance or Value-at-Risk (VaR) as risk measures. However, insurance mathematics (Actuarial Science) offers more robust tools for "ruin probability." \citet{embrechts2013modelling} provide a comprehensive treatment of extremal events. We adapt survival analysis concepts, specifically the Kaplan-Meier estimator \citep{kaplan1958nonparametric}, to estimate the "time-to-recovery" from drawdowns, providing the agent with a predictive safety signal that is absent in standard volatility-based observations.

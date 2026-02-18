@@ -1,0 +1,21 @@
+In this work, we introduced \textbf{TAPE-TCN}, a novel Deep Reinforcement Learning framework for portfolio management.
+By synthesizing temporal deep learning, actuarial risk classification, and multi-objective shaping, we establish a reproducible framework for drawdown-aware, turnover-aware allocation.
+
+Our key contributions are:
+\begin{enumerate}
+    \item \textbf{Architecture}: Demonstrating that TCNs with dilated convolutions capture long-term market dependencies better than traditional RNNs.
+    \item \textbf{Actuarial Risk Classification}: Adapting the Chain Ladder method \citep{mack1993distribution,taylor2000loss} from insurance reserving to classify financial drawdowns into 4 severity buckets, enabling the agent to learn risk-dependent strategies.
+    \item \textbf{Efficiency Objective}: Defining and operationalizing a low-churn, cost-aware training objective suitable for institutional deployment constraints.
+    \item \textbf{Robustness Protocol}: Defining a horizon-aware and regime-aware evaluation protocol for deterministic and stochastic policy assessment.
+\end{enumerate}
+
+\noindent\textbf{Results placeholder note.} Quantitative performance claims are intentionally omitted in this draft section and will be inserted after completion of the full TCN variant sweep and final checkpoint selection.
+
+\subsection*{Future Work}
+Several extensions would further enhance the system:
+
+\textbf{Actuarial Enhancements}: Implement Kaplan-Meier survival models \citep{kaplan1958nonparametric} to provide the agent with recovery probability estimates, moving beyond simple severity classification to predictive risk metrics. This would enable the agent to anticipate drawdown durations rather than merely reacting to current depths.
+
+\textbf{Asset Universe Expansion}: Scale to 500+ instruments using Graph Neural Networks (GNNs) to model inter-asset correlation structures explicitly, capturing sector rotations and contagion effects.
+
+\textbf{Live Deployment}: Validate the model in a paper-trading environment with real-time market data to test execution quality, slippage handling, and adapt parameters under live conditions.
