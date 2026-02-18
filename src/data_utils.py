@@ -27,7 +27,11 @@ import pandas as pd
 import numpy as np
 import os
 import yfinance as yf
-import pandas_ta as ta
+try:
+    import pandas_ta as ta
+except ImportError:
+    # Colab fallback: community-maintained package with mostly compatible API.
+    import pandas_ta_classic as ta
 import fredapi
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 import joblib
