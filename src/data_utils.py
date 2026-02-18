@@ -595,15 +595,23 @@ class DataProcessor:
                 if ta_result is not None:
                     if isinstance(ta_result, pd.DataFrame):
                         # Multiple output columns (e.g., MACD, Bollinger Bands)
+                        ta_aligned = ta_result.reindex(group_df.index)
                         for i, output_col in enumerate(output_cols):
-                            if i < len(ta_result.columns):
-                                group_df[output_col] = ta_result.iloc[:, i].values
+                            if i < len(ta_aligned.columns):
+                                group_df[output_col] = pd.to_numeric(
+                                    ta_aligned.iloc[:, i],
+                                    errors='coerce'
+                                )
                             else:
                                 group_df[output_col] = np.nan
                     elif isinstance(ta_result, pd.Series):
                         # Single output column (e.g., RSI, EMA)
                         if output_cols:
-                            group_df[output_cols[0]] = ta_result.values
+                            ta_series = ta_result.reindex(group_df.index)
+                            group_df[output_cols[0]] = pd.to_numeric(
+                                ta_series,
+                                errors='coerce'
+                            )
                 else:
                     # Fill with NaN if calculation failed
                     for output_col in output_cols:

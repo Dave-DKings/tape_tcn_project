@@ -170,10 +170,10 @@ FRED_SERIES_CONFIG = [
     {"code": "UNRATE", "name": "UNRATE", "freq": "m", "calc": ["level", "diff", "zscore"]},
     {"code": "PAYEMS", "name": "PAYEMS", "freq": "m", "calc": ["level", "diff", "yoy"]},
     {"code": "INDPRO", "name": "INDPRO", "freq": "m", "calc": ["level", "diff", "yoy"]},
-    {"code": "ISM/MAN_PMI", "name": "ISM_MAN_PMI", "freq": "m", "calc": ["level", "diff"]},
+    {"code": "NAPM", "name": "ISM_MAN_PMI", "freq": "m", "calc": ["level", "diff"]},
     {"code": "BAMLC0A4CBBBEY", "name": "IG_Credit", "freq": "d", "calc": ["level", "diff", "zscore"]},
     {"code": "BAMLH0A0HYM2", "name": "HY_Credit", "freq": "d", "calc": ["level", "diff", "zscore"]},
-    {"code": "MOVE", "name": "MOVE", "freq": "d", "calc": ["level", "zscore"]},
+    {"code": "MOVEINDEX", "name": "MOVE", "freq": "d", "calc": ["level", "zscore"]},
     {"code": "VIXCLS", "name": "VIX", "freq": "d", "calc": ["level", "zscore"]},
 ]
 
