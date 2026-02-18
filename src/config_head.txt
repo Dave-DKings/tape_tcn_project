@@ -1,0 +1,300 @@
+﻿# src/config.py
+import numpy as np # type: ignore
+import os
+import copy
+
+# --- GENERAL PROJECT SETTINGS ---
+PROJECT_NAME = "AdaptivePortfolioRL_Prototype"
+RANDOM_SEED = 42
+TF_DEVICE = "/gpu:0" if len(os.environ.get("CUDA_VISIBLE_DEVICES", "")) > 0 else "/cpu:0"
+
+# --- DATA PATHS ---
+BASE_PROJECT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+BASE_DATA_PATH = os.path.join(BASE_PROJECT_PATH, 'data')
+
+PATH_DAILY_OHLCV = os.path.join(BASE_DATA_PATH, "daily_ohlcv_5_assets.csv") # This file will be created by data_utils on first run if not present
+PATH_PROCESSED_MACRO_DAILY_ALIGNED = os.path.join(BASE_DATA_PATH, "processed_daily_macro_features.csv")
+
+# --- API KEYS ---
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY", "0TCPMBYEB782NGCC")
+
+# --- DATA DATE RANGES ---
+DATA_FETCH_START_DATE = "2009-01-01"
+DATA_FETCH_END_DATE = "2025-10-31"
+ANALYSIS_START_DATE = "2011-01-01"
+ANALYSIS_END_DATE = "2023-12-31"
+
+# --- ASSET CONFIGURATION ---
+ASSET_TICKERS = ["AAPL", "MSFT", "XOM", "JNJ", "GOOGL"]  # Using assets available in download function
+NUM_ASSETS = len(ASSET_TICKERS)
+CASH_ASSET_NAME = "CASH"
+
+# --- PORTFOLIO INITIALIZATION ---
+# Options: 'equal', 'volume_weighted', 'custom'
+INITIAL_WEIGHTS_METHOD = "volume_weighted"  # Use volume-based weighting
+MARKET_CAP_CASH_ALLOCATION = 0.02  # 2% cash allocation for volume weighting
+EQUAL_WEIGHT_CASH_ALLOCATION = 0.167  # 1/6 for equal weighting (5 assets + cash)
+
+# --- FEATURE ENGINEERING CONFIGURATION (TEMPLATES) ---
+TECHNICAL_INDICATORS_CONFIG = [
+    {"name": "EMA", "params": {"length": 12}, "output_cols": ["EMA_12"]},
+    {"name": "EMA", "params": {"length": 26}, "output_cols": ["EMA_26"]},
+    {"name": "BBANDS", "params": {"length": 20, "std": 2}, "output_cols": ["BBL_20_2.0", "BBM_20_2.0", "BBU_20_2.0"]},
+    {"name": "MACD", "params": {"fast": 12, "slow": 26, "signal": 9}, "output_cols": ["MACD_12_26_9", "MACDh_12_26_9", "MACDs_12_26_9"]},
+    {"name": "RSI", "params": {"length": 14}, "output_cols": ["RSI_14"]},
+    # Adding the other 9 TIs from the full list for a comprehensive baseline
+    {"name": "STOCH", "params": {"k": 14, "d": 3, "smooth_k": 3}, "output_cols": ["STOCHk_14_3_3", "STOCHd_14_3_3"]},
+    {"name": "WILLR", "params": {"length": 14}, "output_cols": ["WILLR_14"]},
+    {"name": "SMA_price", "params": {"length": 50}, "output_cols": ["SMA_50"]}, # Renamed to avoid conflict
+    {"name": "ADX", "params": {"length": 14}, "output_cols": ["ADX_14", "DMP_14", "DMN_14"]},
+    {"name": "ATR", "params": {"length": 14, "mamode":"ema"}, "output_cols": ["ATRr_14"]},
+    {"name": "NATR", "params": {"length": 14}, "output_cols": ["NATR_14"]},
+    {"name": "SMA_volume", "params": {"length": 20, "close_col_name": "Volume"}, "output_cols": ["VOL_SMA_20"]},
+    {"name": "OBV", "params": {}, "output_cols": ["OBV"]},
+    {"name": "MFI", "params": {"length": 14}, "output_cols": ["MFI_14"]}
+]
+
+TCN_FORECAST_PARAMS = {
+    "sequence_length": 20, "epochs": 2, "batch_size": 32, "learning_rate": 0.01,  # Reduced epochs for faster testing
+    "tcn_units": [80, 80], "dropout_rate": 0.2
+}
+
+DYNAMIC_COVARIANCE_PARAMS = {
+    "covariance_window_length": 60, "feature_extraction_methods": ["eigenvalues"],
+    "num_eigenvalues": min(3, NUM_ASSETS)
+}
+
+ACTUARIAL_PARAMS = {
+    "enabled": True,
+    "severity_buckets": [0.05, 0.10, 0.15, 0.20, 0.25, 0.30],
+    "development_horizons": [10, 20, 30, 60, 90, 120],
+    "min_events_for_credibility": 5
+}
+
+FUNDAMENTAL_FEATURES_CONFIG = {
+    "enabled": False,
+    # CSV expected to contain columns: Date, Ticker, FCFE, Revenue, NCFO
+    "data_path": os.path.join(BASE_DATA_PATH, "quarterly_fundamentals.csv"),
+    "lag_quarters": 8,
+    "staleness_days_normalizer": 90.0
+}
+
+FEATURES_TO_DISABLE = [
+    "BAMLC0A0CMEY_level",
+    "BAMLC0A0CMEY_diff",
+    "BAMLC0A0CMEY_zscore",
+    "BAMLH0A0HYM2_level",
+    "BAMLH0A0HYM2_diff",
+    "BAMLH0A0HYM2_zscore",
+    "DAAA_level",
+    "DAAA_zscore",
+    "VIX_level",
+    "VIX_zscore",
+    "MOVE_level",
+    "MOVE_zscore",
+    "UNRATE_level",
+    "UNRATE_diff",
+    "UNRATE_zscore",
+    "PAYEMS_level",
+    "PAYEMS_diff",
+    "PAYEMS_yoy",
+    "ICSA_level",
+    "ICSA_diff",
+    "INDPRO_level",
+    "INDPRO_diff",
+    "INDPRO_yoy",
+    "CPI_level",
+    "CPI_mom",
+    "CPI_yoy",
+    "PPI_level",
+    "PPI_mom",
+    "PPI_yoy",
+    "FedBalanceSheet_level",
+    "FedBalanceSheet_diff",
+    "ON_RRP_level",
+    "ON_RRP_diff",
+]
+
+FEATURE_SELECTION_CONFIG = {
+    "disable_features": True,
+    "disabled_features": FEATURES_TO_DISABLE,
+}
+
+ALPHA_FEATURES_CONFIG = {
+    "enabled": True,
+    "cross_sectional_column": "LogReturn_1d",
+    "residual_momentum_window": 21,
+    "volume_percentile_window": 63,
+    "reversal_window": 5,
+    "vol_of_vol_window": 63,
+    "beta_window": 63,
+    "obv_window": 21,
+    "yield_curve": {
+        "long_col": "DGS10_level",
+        "short_col": "DGS2_level",
+    },
+    "retain_market_return": False,
+    "epsilon": 1e-9,
+}
+
+FRED_API_KEY = "da9d24dd8de4f924dcbc8416e539b4ef" # User's actual FRED API Key
+FRED_SERIES_CONFIG = [
+    {"code": "EFFR", "name": "EFFR", "freq": "d", "calc": ["level", "diff", "zscore"]},
+    {"code": "SOFR", "name": "SOFR", "freq": "d", "calc": ["level", "diff"]},
+    {"code": "FEDFUNDS", "name": "FEDFUNDS", "freq": "m", "calc": ["level", "diff", "zscore"]},
+    {"code": "DGS10", "name": "DGS10", "freq": "d", "calc": ["level", "diff", "slope"]},
+    {"code": "DGS2", "name": "DGS2", "freq": "d", "calc": ["level", "diff"]},
+    {"code": "T10Y2Y", "name": "T10Y2Y", "freq": "d", "calc": ["level"]},
+    {"code": "DFII10", "name": "TIPS10Y", "freq": "d", "calc": ["level", "diff"]},
+    {"code": "T10YIE", "name": "BreakevenInf10Y", "freq": "d", "calc": ["level", "diff"]},
+    {"code": "T5YIFR", "name": "BreakevenInf5Y", "freq": "d", "calc": ["level", "diff"]},
+    {"code": "WALCL", "name": "FedBalanceSheet", "freq": "w", "calc": ["level", "diff"]},
+    {"code": "RRPONTSYD", "name": "ON_RRP", "freq": "d", "calc": ["level", "diff"]},
+    {"code": "CPIAUCSL", "name": "CPI", "freq": "m", "calc": ["yoy", "mom"]},
+    {"code": "PPIACO", "name": "PPI", "freq": "m", "calc": ["yoy", "mom"]},
+    {"code": "UNRATE", "name": "UNRATE", "freq": "m", "calc": ["level", "diff", "zscore"]},
+    {"code": "PAYEMS", "name": "PAYEMS", "freq": "m", "calc": ["level", "diff", "yoy"]},
+    {"code": "INDPRO", "name": "INDPRO", "freq": "m", "calc": ["level", "diff", "yoy"]},
+    {"code": "ISM/MAN_PMI", "name": "ISM_MAN_PMI", "freq": "m", "calc": ["level", "diff"]},
+    {"code": "BAMLC0A4CBBBEY", "name": "IG_Credit", "freq": "d", "calc": ["level", "diff", "zscore"]},
+    {"code": "BAMLH0A0HYM2", "name": "HY_Credit", "freq": "d", "calc": ["level", "diff", "zscore"]},
+    {"code": "MOVE", "name": "MOVE", "freq": "d", "calc": ["level", "zscore"]},
+    {"code": "VIXCLS", "name": "VIX", "freq": "d", "calc": ["level", "zscore"]},
+]
+
+MACRO_DATA_CONFIG = {
+    "fred_api_key": FRED_API_KEY,
+    "fred_series_config": FRED_SERIES_CONFIG,
+    "business_days_only": True,
+    "ffill_limit": None,
+}
+
+# --- PERFORMANCE CALCULATION PARAMETERS ---
+PERFORMANCE_METRICS_CONFIG = {
+    "rolling_window_episodes": 20,  # Episodes for rolling performance calculation
+    "risk_free_rate": 0.02,  # Annual risk-free rate for Sharpe calculation
+    "trading_days_per_year": 252,
+    "metrics_to_track": [
+        "total_return", "sharpe_ratio", "sortino_ratio", "max_drawdown", 
+        "turnover", "skewness", "volatility", "win_rate"
+    ]
+}
+
+# --- MARKET REGIME DETECTION PARAMETERS ---
+MARKET_REGIME_CONFIG = {
+    "volatility_regimes": {
+        "low": {"vix_threshold": 15.0, "rolling_vol_threshold": 0.15},
+        "medium": {"vix_threshold": 25.0, "rolling_vol_threshold": 0.25},
+        "high": {"vix_threshold": 35.0, "rolling_vol_threshold": 0.35}
+    },
+    "trend_detection": {
+        "bullish_threshold": 0.05,   # 5% above long-term MA
+        "bearish_threshold": -0.05,  # 5% below long-term MA
+        "sideways_threshold": 0.02   # Within 2% is sideways
+    },
+    "recession_indicators": {
+        "yield_curve_inversion_threshold": -0.1,  # 10bp inversion
+        "unemployment_change_threshold": 0.5      # 0.5% increase in unemployment
+    }
+}
+
+# --- TAPE REWARD & UTILITY PROFILE DEFINITIONS ---
+METRICS_ORDER = ['sharpe', 'sortino', 'mdd', 'turnover', 'skew']
+
+PROFILE_BALANCED_GROWTH = {
+    "name": "BalancedGrowth",
+    # Elevated Sharpe/Sortino targets to reward rare high-performance episodes
+    "mu": np.array([1.0, 1.3, -0.15, 0.60, 0.0], dtype=np.float32),  # Turnover target: 0.6 = 60% daily
+    "sigma_sq_minus": np.array([0.09, 0.16, 0.0025, 1.0, 0.02], dtype=np.float32), #0.09
+    "sigma_sq_plus":  np.array([0.25, 0.36, 0.01, 2.0, 0.04], dtype=np.float32), #0.25
+    "weights":   np.array([0.35, 0.25, 0.25, 0.10, 0.05], dtype=np.float32),
+    "metrics_order": METRICS_ORDER,
+    "directions": ['increasing', 'increasing', 'decreasing', 'decreasing', 'increasing'],
+    "a_bounds": np.array([-2.0, -1.0, -0.30, 0.0, -1.0]),
+    "b_bounds": np.array([3.0, 4.0, 0.0, 1.2, 1.0]),  # Turnover upper bound: 2.0 = 200% (allow high activity)
+}
+PROFILE_AGGRESSIVE_ALPHA_SEEKER = {
+    "name": "AggressiveAlphaSeeker",
+    "mu": np.array([1.5, 2.5, -0.25, 1, 0.15], dtype=np.float32),
+    "sigma_sq_minus": np.array([0.09, 0.16, 0.01, 2.0, 0.0025], dtype=np.float32),
+    "sigma_sq_plus":  np.array([1.0, 1.44, 0.0225, 4.0, 0.16], dtype=np.float32),
+    "weights":   np.array([0.40, 0.30, 0.10, 0.05, 0.15], dtype=np.float32),
+    "metrics_order": METRICS_ORDER,
+    "directions": ['increasing', 'increasing', 'decreasing', 'decreasing', 'increasing'],
+    "a_bounds": np.array([-1.0, 0.0, -0.50, 0.0, -1.0]),
+    "b_bounds": np.array([4.0, 5.0, 0.0, 2.5, 1.5]),
+}
+PROFILE_CAPITAL_PRESERVATION = {
+    "name": "CapitalPreservation",
+    "mu": np.array([0.5, 1.0, -0.08, 0.02, -0.05], dtype=np.float32),
+    "sigma_sq_minus": np.array([0.01, 0.0225, 0.0004, 0.5, 0.0225], dtype=np.float32),
+    "sigma_sq_plus":  np.array([0.09, 0.16, 0.001, 1.0, 0.0225], dtype=np.float32),
+    "weights":   np.array([0.05, 0.05, 0.60, 0.20, 0.10], dtype=np.float32),
+    "metrics_order": METRICS_ORDER,
+    "directions": ['increasing', 'increasing', 'decreasing', 'decreasing', 'increasing'],
+    "a_bounds": np.array([-1.0, -0.5, -0.20, 0.0, -1.0]),
+    "b_bounds": np.array([2.0, 3.0, 0.0, 1.0, 1.0]),
+}
+ALL_PROFILES_LIST = [PROFILE_BALANCED_GROWTH, PROFILE_AGGRESSIVE_ALPHA_SEEKER, PROFILE_CAPITAL_PRESERVATION]
+
+# --- PHASE CONFIGURATIONS ---
+
+# Phase 1: Baseline Enhanced Vanilla PPO
+PHASE1_CONFIG = {
+    "phase_name": "Phase1_Baseline_PPO",
+    #================================================
+    "ASSET_TICKERS": ASSET_TICKERS,
+    "NUM_ASSETS": NUM_ASSETS,
+    "BASE_DATA_PATH": BASE_DATA_PATH,
+    "PATH_DAILY_OHLCV": PATH_DAILY_OHLCV,
+    "DATA_FETCH_START_DATE": DATA_FETCH_START_DATE,
+    "DATA_FETCH_END_DATE": DATA_FETCH_END_DATE,
+    "ANALYSIS_START_DATE": ANALYSIS_START_DATE,
+    "ANALYSIS_END_DATE": ANALYSIS_END_DATE,
+    "feature_params": {
+        "technical_indicators": TECHNICAL_INDICATORS_CONFIG,
+        "include_log_returns": True,
+        "log_return_col_name": "Daily_LogReturn",
+        # Dynamic covariance enabled for portfolio correlation insights
+        "dynamic_covariance": DYNAMIC_COVARIANCE_PARAMS,
+        "actuarial_params": ACTUARIAL_PARAMS,
+        # Advanced features still disabled for Phase 1
+        "tcn_forecast": None,
+        "macro_data": copy.deepcopy(MACRO_DATA_CONFIG),
+        "fundamental_features": copy.deepcopy(FUNDAMENTAL_FEATURES_CONFIG),
+        "regime_features": {
+            "enabled": True,
+            "vol_windows": {"short": 21, "long": 126},
+            "trend_windows": {"short": 50, "long": 200},
+            "momentum_windows": {"short": 63, "long": 252},
+            "correlation_window": 60,
+            "breadth_window": 21,
+        },
+        "feature_selection": copy.deepcopy(FEATURE_SELECTION_CONFIG),
+        "alpha_features": copy.deepcopy(ALPHA_FEATURES_CONFIG),
+    },
+    #================================================
+    "environment_params": {
+        "initial_balance": 100000.0,
+        "transaction_cost_pct": 0.001,
+        "reward_type": "advanced_tape",  # Three-component TAPE reward
+        "max_steps_per_episode": None,  # Episode horizon managed dynamically during training
+        "done_on_balance_threshold_pct": 0.5,  # PHASE 1: Increased from 0.2 to 0.5 for exploration
+        "random_start": True,
+        "tape_terminal_scalar": 10.0,
+        "tape_terminal_clip": 10.0,
+        "target_turnover": 0.60,
+        "turnover_penalty_scalar": 2.5,
+        "turnover_target_band": 0.20,
+        "dsr_scalar": 5.0,  # Differential Sharpe Ratio multiplier
+        "drawdown_constraint": {
+            "enabled": True,
+            "target": 0.20,
+            "penalty_coef": 3.0,
+            "dual_learning_rate": 0.35,
+            "lambda_init": 0.15,
+            "lambda_floor": 0.25,
+            "lambda_max": 12.0,
+            "tolerance": -0.02
+        }
+    },

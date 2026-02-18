@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.bbl
+*.blg
+*.out
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+*.toc
+*.lof
+*.lot
+
+# Model checkpoints and weights (large files)
+*.weights.h5
+*.h5
+tcn_results/
+tcn_results_01/
+mlp_results/
+output_logs/
+
+# Large result files (optional - comment out if you want to track these)
+results/model_outputs/stochastic/*.csv
+results/model_outputs/stochastic/*.xlsx
+
+# Archive (historical files not needed in repo)
+archive/
+
+# Temporary analysis files
+--*.csv
+*.tmp
+temp_*.py
