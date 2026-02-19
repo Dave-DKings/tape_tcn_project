@@ -578,6 +578,13 @@ TRAINING_FIELDNAMES: List[str] = [
     "tape_score",
     "tape_bonus",
     "tape_bonus_raw",
+    "tape_terminal_bonus_mode",
+    "tape_terminal_baseline",
+    "tape_terminal_neutral_band_applied",
+    "tape_terminal_neutral_band_halfwidth",
+    "tape_gate_a_triggered",
+    "tape_gate_a_sharpe",
+    "tape_gate_a_max_drawdown_abs",
     "terminal_intra_step_tape_potential",
     "terminal_intra_step_tape_delta_reward",
     "drawdown_avg_excess",
@@ -707,6 +714,28 @@ def _build_training_metrics_row(
         row["tape_score"] = drawdown_info.get("tape_score", row.get("tape_score"))
         row["tape_bonus"] = drawdown_info.get("tape_bonus", row.get("tape_bonus"))
         row["tape_bonus_raw"] = drawdown_info.get("tape_bonus_raw", row.get("tape_bonus_raw"))
+        row["tape_terminal_bonus_mode"] = drawdown_info.get(
+            "tape_terminal_bonus_mode",
+            row.get("tape_terminal_bonus_mode"),
+        )
+        row["tape_terminal_baseline"] = drawdown_info.get(
+            "tape_terminal_baseline",
+            row.get("tape_terminal_baseline"),
+        )
+        row["tape_terminal_neutral_band_applied"] = drawdown_info.get(
+            "tape_terminal_neutral_band_applied",
+            row.get("tape_terminal_neutral_band_applied"),
+        )
+        row["tape_terminal_neutral_band_halfwidth"] = drawdown_info.get(
+            "tape_terminal_neutral_band_halfwidth",
+            row.get("tape_terminal_neutral_band_halfwidth"),
+        )
+        row["tape_gate_a_triggered"] = drawdown_info.get("tape_gate_a_triggered", row.get("tape_gate_a_triggered"))
+        row["tape_gate_a_sharpe"] = drawdown_info.get("tape_gate_a_sharpe", row.get("tape_gate_a_sharpe"))
+        row["tape_gate_a_max_drawdown_abs"] = drawdown_info.get(
+            "tape_gate_a_max_drawdown_abs",
+            row.get("tape_gate_a_max_drawdown_abs"),
+        )
         row["terminal_intra_step_tape_potential"] = drawdown_info.get(
             "intra_step_tape_potential",
             row.get("terminal_intra_step_tape_potential"),
@@ -969,6 +998,13 @@ def load_training_metadata_into_config(
         "turnover_target_band",
         "tape_terminal_scalar",
         "tape_terminal_clip",
+        "tape_terminal_bonus_mode",
+        "tape_terminal_baseline",
+        "tape_terminal_neutral_band_enabled",
+        "tape_terminal_neutral_band_halfwidth",
+        "tape_terminal_gate_a_enabled",
+        "tape_terminal_gate_a_sharpe_threshold",
+        "tape_terminal_gate_a_max_drawdown",
         "reward_credit_assignment_mode",
         "retroactive_episode_reward_scaling",
         "training_entrypoint",
@@ -1413,8 +1449,27 @@ def run_experiment6_tape(
     print(f"   Daily: Base + DSR/PBRS + Turnover_Proximity")
     print(
         "   Terminal: "
-        f"TAPE_Score × {config.get('environment_params', {}).get('tape_terminal_scalar', 10.0)} "
+        f"mode={config.get('environment_params', {}).get('tape_terminal_bonus_mode', 'signed')} | "
+        f"baseline={config.get('environment_params', {}).get('tape_terminal_baseline', 0.20):.2f} | "
+        f"scalar={config.get('environment_params', {}).get('tape_terminal_scalar', 10.0)} "
         f"(clipped ±{config.get('environment_params', {}).get('tape_terminal_clip', 10.0)})"
+    )
+    gate_cfg = config.get("environment_params", {})
+    gate_enabled = bool(gate_cfg.get("tape_terminal_gate_a_enabled", False))
+    gate_sharpe = float(gate_cfg.get("tape_terminal_gate_a_sharpe_threshold", 0.0))
+    gate_mdd = float(gate_cfg.get("tape_terminal_gate_a_max_drawdown", 0.25))
+    print(
+        "   Gate A: "
+        f"{'enabled' if gate_enabled else 'disabled'} "
+        f"(Sharpe ≤ {gate_sharpe:.2f} "
+        f"or MDD ≥ {gate_mdd*100:.1f}% -> force non-positive terminal bonus)"
+    )
+    gate_neutral_enabled = bool(gate_cfg.get("tape_terminal_neutral_band_enabled", True))
+    gate_neutral_halfwidth = float(gate_cfg.get("tape_terminal_neutral_band_halfwidth", 0.02))
+    print(
+        "   Neutral Band: "
+        f"{'enabled' if gate_neutral_enabled else 'disabled'} "
+        f"(±{gate_neutral_halfwidth:.3f} around baseline)"
     )
     print("   🔄 Profile Manager: disabled (static profile only)")
     print(f"🎲 Experiment Seed: {experiment_seed} (Base: {random_seed}, Offset: {exp_idx * 1000})")
@@ -1455,6 +1510,13 @@ def run_experiment6_tape(
     env_params = config.get("environment_params", {})
     tape_terminal_scalar = float(env_params.get("tape_terminal_scalar", 10.0))
     tape_terminal_clip = float(env_params.get("tape_terminal_clip", 10.0))
+    tape_terminal_bonus_mode = str(env_params.get("tape_terminal_bonus_mode", "signed")).lower().strip()
+    tape_terminal_baseline = float(env_params.get("tape_terminal_baseline", 0.20))
+    tape_terminal_neutral_band_enabled = bool(env_params.get("tape_terminal_neutral_band_enabled", True))
+    tape_terminal_neutral_band_halfwidth = float(env_params.get("tape_terminal_neutral_band_halfwidth", 0.02))
+    tape_terminal_gate_a_enabled = bool(env_params.get("tape_terminal_gate_a_enabled", False))
+    tape_terminal_gate_a_sharpe_threshold = float(env_params.get("tape_terminal_gate_a_sharpe_threshold", 0.0))
+    tape_terminal_gate_a_max_drawdown = float(env_params.get("tape_terminal_gate_a_max_drawdown", 0.25))
     dsr_scalar_cfg = float(env_params.get("dsr_scalar", 7.0))
     target_turnover_cfg = float(env_params.get("target_turnover", 0.60))
     turnover_band_cfg = float(env_params.get("turnover_target_band", 0.20))
@@ -1483,7 +1545,20 @@ def run_experiment6_tape(
         f"(target={target_turnover_cfg:.2f}, band=±{turnover_band_cfg:.2f}, scalar={turnover_scalar_display})"
     )
     print(f"      ↳ Schedule: {turnover_schedule_pretty}")
-    print(f"   🎁 Terminal: TAPE Score × {tape_terminal_scalar:.1f} (clipped ±{tape_terminal_clip:.1f})")
+    print(
+        "   🎁 Terminal: "
+        f"mode={tape_terminal_bonus_mode}, baseline={tape_terminal_baseline:.2f}, "
+        f"scalar={tape_terminal_scalar:.1f} (clipped ±{tape_terminal_clip:.1f})"
+    )
+    print(
+        f"   🟰 Neutral Band: {'enabled' if tape_terminal_neutral_band_enabled else 'disabled'} "
+        f"(±{tape_terminal_neutral_band_halfwidth:.3f} around baseline)"
+    )
+    print(
+        f"   🚦 Gate A: {'enabled' if tape_terminal_gate_a_enabled else 'disabled'} "
+        f"(Sharpe ≤ {tape_terminal_gate_a_sharpe_threshold:.2f}, "
+        f"MDD ≥ {tape_terminal_gate_a_max_drawdown*100:.1f}%)"
+    )
     print("   🧠 Credit Assignment: step reward is computed at each environment step")
     print("   🧾 Episode-End Handling: terminal TAPE bonus is added at episode completion only")
     print("   ✅ Retroactive episode-wide reward rescaling: disabled in notebook helper path")
@@ -1546,6 +1621,13 @@ def run_experiment6_tape(
         reward_system="tape",
         tape_profile=profile,
         tape_terminal_scalar=tape_terminal_scalar,
+        tape_terminal_bonus_mode=tape_terminal_bonus_mode,
+        tape_terminal_baseline=tape_terminal_baseline,
+        tape_terminal_neutral_band_enabled=tape_terminal_neutral_band_enabled,
+        tape_terminal_neutral_band_halfwidth=tape_terminal_neutral_band_halfwidth,
+        tape_terminal_gate_a_enabled=tape_terminal_gate_a_enabled,
+        tape_terminal_gate_a_sharpe_threshold=tape_terminal_gate_a_sharpe_threshold,
+        tape_terminal_gate_a_max_drawdown=tape_terminal_gate_a_max_drawdown,
         dsr_window=60,
         dsr_scalar=dsr_scalar_cfg,
         target_turnover=target_turnover_cfg,
@@ -1582,6 +1664,13 @@ def run_experiment6_tape(
         reward_system='tape',
         tape_profile=profile,
         tape_terminal_scalar=tape_terminal_scalar,
+        tape_terminal_bonus_mode=tape_terminal_bonus_mode,
+        tape_terminal_baseline=tape_terminal_baseline,
+        tape_terminal_neutral_band_enabled=tape_terminal_neutral_band_enabled,
+        tape_terminal_neutral_band_halfwidth=tape_terminal_neutral_band_halfwidth,
+        tape_terminal_gate_a_enabled=tape_terminal_gate_a_enabled,
+        tape_terminal_gate_a_sharpe_threshold=tape_terminal_gate_a_sharpe_threshold,
+        tape_terminal_gate_a_max_drawdown=tape_terminal_gate_a_max_drawdown,
         dsr_window=60,
         dsr_scalar=dsr_scalar_cfg,
         target_turnover=target_turnover_cfg,
@@ -1605,6 +1694,13 @@ def run_experiment6_tape(
         reward_system='tape',
         tape_profile=profile,
         tape_terminal_scalar=tape_terminal_scalar,
+        tape_terminal_bonus_mode=tape_terminal_bonus_mode,
+        tape_terminal_baseline=tape_terminal_baseline,
+        tape_terminal_neutral_band_enabled=tape_terminal_neutral_band_enabled,
+        tape_terminal_neutral_band_halfwidth=tape_terminal_neutral_band_halfwidth,
+        tape_terminal_gate_a_enabled=tape_terminal_gate_a_enabled,
+        tape_terminal_gate_a_sharpe_threshold=tape_terminal_gate_a_sharpe_threshold,
+        tape_terminal_gate_a_max_drawdown=tape_terminal_gate_a_max_drawdown,
         dsr_window=60,
         dsr_scalar=dsr_scalar_cfg,
         target_turnover=target_turnover_cfg,
@@ -2032,6 +2128,13 @@ def run_experiment6_tape(
             "turnover_target_band": turnover_band_cfg,
             "tape_terminal_scalar": tape_terminal_scalar,
             "tape_terminal_clip": tape_terminal_clip,
+            "tape_terminal_bonus_mode": tape_terminal_bonus_mode,
+            "tape_terminal_baseline": tape_terminal_baseline,
+            "tape_terminal_neutral_band_enabled": tape_terminal_neutral_band_enabled,
+            "tape_terminal_neutral_band_halfwidth": tape_terminal_neutral_band_halfwidth,
+            "tape_terminal_gate_a_enabled": tape_terminal_gate_a_enabled,
+            "tape_terminal_gate_a_sharpe_threshold": tape_terminal_gate_a_sharpe_threshold,
+            "tape_terminal_gate_a_max_drawdown": tape_terminal_gate_a_max_drawdown,
             "drawdown_constraint": drawdown_constraint_cfg,
             "tape_profile_name": active_tape_profile.get("name", "BalancedGrowth"),
             "tape_profile_full": _json_ready(active_tape_profile),
@@ -2083,6 +2186,13 @@ def run_experiment6_tape(
     last_tape_score = None
     last_tape_bonus = None
     last_tape_bonus_raw = None
+    last_tape_terminal_bonus_mode = None
+    last_tape_terminal_baseline = None
+    last_tape_terminal_neutral_band_applied = False
+    last_tape_terminal_neutral_band_halfwidth = None
+    last_tape_gate_a_triggered = False
+    last_tape_gate_a_sharpe = None
+    last_tape_gate_a_max_drawdown_abs = None
     last_drawdown_avg_excess = None
     last_drawdown_penalty_sum = None
     last_terminal_intra_step_tape_potential = None
@@ -2159,6 +2269,21 @@ def run_experiment6_tape(
                 last_tape_score = to_scalar(info.get("tape_score", last_tape_score))
                 last_tape_bonus = to_scalar(info.get("tape_bonus", last_tape_bonus))
                 last_tape_bonus_raw = to_scalar(info.get("tape_bonus_raw", last_tape_bonus_raw))
+                last_tape_terminal_bonus_mode = info.get("tape_terminal_bonus_mode", last_tape_terminal_bonus_mode)
+                last_tape_terminal_baseline = to_scalar(
+                    info.get("tape_terminal_baseline", last_tape_terminal_baseline)
+                )
+                last_tape_terminal_neutral_band_applied = bool(
+                    info.get("tape_terminal_neutral_band_applied", last_tape_terminal_neutral_band_applied)
+                )
+                last_tape_terminal_neutral_band_halfwidth = to_scalar(
+                    info.get("tape_terminal_neutral_band_halfwidth", last_tape_terminal_neutral_band_halfwidth)
+                )
+                last_tape_gate_a_triggered = bool(info.get("tape_gate_a_triggered", last_tape_gate_a_triggered))
+                last_tape_gate_a_sharpe = to_scalar(info.get("tape_gate_a_sharpe", last_tape_gate_a_sharpe))
+                last_tape_gate_a_max_drawdown_abs = to_scalar(
+                    info.get("tape_gate_a_max_drawdown_abs", last_tape_gate_a_max_drawdown_abs)
+                )
                 last_terminal_intra_step_tape_potential = to_scalar(
                     info.get("intra_step_tape_potential", last_terminal_intra_step_tape_potential)
                 )
@@ -2181,13 +2306,53 @@ def run_experiment6_tape(
                         "terminal TAPE bonus metadata missing."
                     )
                 if tape_score is not None:
-                    tape_bonus_raw = tape_score * 10.0
-                    tape_bonus_clipped = np.clip(tape_bonus_raw, -10.0, 10.0)
-                    did_clip = tape_bonus_raw != tape_bonus_clipped
+                    env_bonus_raw = info.get("tape_bonus_raw")
+                    env_bonus = info.get("tape_bonus")
+                    if env_bonus_raw is not None:
+                        tape_bonus_raw = float(env_bonus_raw)
+                    else:
+                        tape_score_f = float(tape_score)
+                        if tape_terminal_bonus_mode == "centered":
+                            tape_bonus_raw = float((tape_score_f - tape_terminal_baseline) * tape_terminal_scalar)
+                        elif tape_terminal_bonus_mode == "signed":
+                            if tape_score_f >= tape_terminal_baseline:
+                                denom = max(1e-9, 1.0 - tape_terminal_baseline)
+                                signed_tape = (tape_score_f - tape_terminal_baseline) / denom
+                            else:
+                                denom = max(1e-9, tape_terminal_baseline)
+                                signed_tape = -((tape_terminal_baseline - tape_score_f) / denom)
+                            tape_bonus_raw = float(np.clip(signed_tape, -1.0, 1.0) * tape_terminal_scalar)
+                        else:
+                            tape_bonus_raw = float(tape_score_f * tape_terminal_scalar)
+                        if tape_terminal_neutral_band_enabled and abs(tape_score_f - tape_terminal_baseline) <= tape_terminal_neutral_band_halfwidth:
+                            tape_bonus_raw = 0.0
+                    tape_bonus_clipped = (
+                        float(env_bonus)
+                        if env_bonus is not None
+                        else float(np.clip(tape_bonus_raw, -tape_terminal_clip, tape_terminal_clip))
+                    )
+                    did_clip = abs(tape_bonus_raw - tape_bonus_clipped) > 1e-12
+                    neutral_band_applied = bool(info.get("tape_terminal_neutral_band_applied", False))
+                    gate_triggered = bool(info.get("tape_gate_a_triggered", False))
                     print(
                         f"   🎯 Episode {training_episode_count}: TAPE Score = {tape_score:.4f} "
                         f"(bonus: {tape_bonus_raw:+.2f} → {tape_bonus_clipped:+.2f})"
                     )
+                    if neutral_band_applied:
+                        print(
+                            "      🟰 Neutral band applied "
+                            f"(±{float(info.get('tape_terminal_neutral_band_halfwidth', tape_terminal_neutral_band_halfwidth)):.3f})"
+                        )
+                    if gate_triggered:
+                        gate_sharpe = info.get("tape_gate_a_sharpe")
+                        gate_mdd = info.get("tape_gate_a_max_drawdown_abs")
+                        if gate_sharpe is not None and gate_mdd is not None:
+                            print(
+                                "      🚦 Gate A applied: "
+                                f"Sharpe={float(gate_sharpe):.3f}, MDD={float(gate_mdd)*100:.2f}%"
+                            )
+                        else:
+                            print("      🚦 Gate A applied: forcing non-positive terminal bonus.")
 
                     def save_tape_checkpoint(suffix: str, reason: str) -> None:
                         results_root.mkdir(parents=True, exist_ok=True)
@@ -2479,6 +2644,13 @@ def run_experiment6_tape(
                     "tape_score": last_tape_score,
                     "tape_bonus": last_tape_bonus,
                     "tape_bonus_raw": last_tape_bonus_raw,
+                    "tape_terminal_bonus_mode": last_tape_terminal_bonus_mode,
+                    "tape_terminal_baseline": last_tape_terminal_baseline,
+                    "tape_terminal_neutral_band_applied": last_tape_terminal_neutral_band_applied,
+                    "tape_terminal_neutral_band_halfwidth": last_tape_terminal_neutral_band_halfwidth,
+                    "tape_gate_a_triggered": last_tape_gate_a_triggered,
+                    "tape_gate_a_sharpe": last_tape_gate_a_sharpe,
+                    "tape_gate_a_max_drawdown_abs": last_tape_gate_a_max_drawdown_abs,
                     "terminal_intra_step_tape_potential": terminal_intra_step_tape_potential,
                     "terminal_intra_step_tape_delta_reward": terminal_intra_step_tape_delta_reward,
                     "drawdown_avg_excess": terminal_drawdown_avg_excess,
@@ -2632,6 +2804,13 @@ def evaluate_experiment6_checkpoint(
 
     tape_terminal_scalar = float(env_params.get("tape_terminal_scalar", 10.0))
     tape_terminal_clip = float(env_params.get("tape_terminal_clip", 10.0))
+    tape_terminal_bonus_mode = str(env_params.get("tape_terminal_bonus_mode", "signed")).lower().strip()
+    tape_terminal_baseline = float(env_params.get("tape_terminal_baseline", 0.20))
+    tape_terminal_neutral_band_enabled = bool(env_params.get("tape_terminal_neutral_band_enabled", True))
+    tape_terminal_neutral_band_halfwidth = float(env_params.get("tape_terminal_neutral_band_halfwidth", 0.02))
+    tape_terminal_gate_a_enabled = bool(env_params.get("tape_terminal_gate_a_enabled", False))
+    tape_terminal_gate_a_sharpe_threshold = float(env_params.get("tape_terminal_gate_a_sharpe_threshold", 0.0))
+    tape_terminal_gate_a_max_drawdown = float(env_params.get("tape_terminal_gate_a_max_drawdown", 0.25))
     dsr_scalar_cfg = float(env_params.get("dsr_scalar", 7.0))
     target_turnover_cfg = float(env_params.get("target_turnover", 0.60))
     turnover_band_cfg = float(env_params.get("turnover_target_band", 0.20))
@@ -2815,6 +2994,13 @@ def evaluate_experiment6_checkpoint(
         reward_system="tape",
         tape_profile=active_eval_profile,
         tape_terminal_scalar=tape_terminal_scalar,
+        tape_terminal_bonus_mode=tape_terminal_bonus_mode,
+        tape_terminal_baseline=tape_terminal_baseline,
+        tape_terminal_neutral_band_enabled=tape_terminal_neutral_band_enabled,
+        tape_terminal_neutral_band_halfwidth=tape_terminal_neutral_band_halfwidth,
+        tape_terminal_gate_a_enabled=tape_terminal_gate_a_enabled,
+        tape_terminal_gate_a_sharpe_threshold=tape_terminal_gate_a_sharpe_threshold,
+        tape_terminal_gate_a_max_drawdown=tape_terminal_gate_a_max_drawdown,
         dsr_window=60,
         dsr_scalar=dsr_scalar_cfg,
         target_turnover=target_turnover_cfg,
@@ -2838,6 +3024,13 @@ def evaluate_experiment6_checkpoint(
         reward_system="tape",
         tape_profile=active_eval_profile,
         tape_terminal_scalar=tape_terminal_scalar,
+        tape_terminal_bonus_mode=tape_terminal_bonus_mode,
+        tape_terminal_baseline=tape_terminal_baseline,
+        tape_terminal_neutral_band_enabled=tape_terminal_neutral_band_enabled,
+        tape_terminal_neutral_band_halfwidth=tape_terminal_neutral_band_halfwidth,
+        tape_terminal_gate_a_enabled=tape_terminal_gate_a_enabled,
+        tape_terminal_gate_a_sharpe_threshold=tape_terminal_gate_a_sharpe_threshold,
+        tape_terminal_gate_a_max_drawdown=tape_terminal_gate_a_max_drawdown,
         dsr_window=60,
         dsr_scalar=dsr_scalar_cfg,
         target_turnover=target_turnover_cfg,

@@ -278,6 +278,13 @@ class TrainingSession:
         tape_profile = env_params.get('tape_profile', PROFILE_BALANCED_GROWTH)
         tape_scalar = env_params.get('tape_terminal_scalar', 10.0)
         tape_clip = env_params.get('tape_terminal_clip', 8.0)
+        tape_bonus_mode = env_params.get('tape_terminal_bonus_mode', 'signed')
+        tape_baseline = env_params.get('tape_terminal_baseline', 0.20)
+        tape_neutral_band_enabled = env_params.get('tape_terminal_neutral_band_enabled', True)
+        tape_neutral_band_halfwidth = env_params.get('tape_terminal_neutral_band_halfwidth', 0.02)
+        tape_gate_a_enabled = env_params.get('tape_terminal_gate_a_enabled', False)
+        tape_gate_a_sharpe_threshold = env_params.get('tape_terminal_gate_a_sharpe_threshold', 0.0)
+        tape_gate_a_max_drawdown = env_params.get('tape_terminal_gate_a_max_drawdown', 0.25)
         dsr_window = env_params.get('dsr_window', 60)
         dsr_scalar = env_params.get('dsr_scalar', 7.0)
         target_turnover = env_params.get('target_turnover', 0.70)
@@ -304,6 +311,13 @@ class TrainingSession:
             tape_profile=tape_profile if reward_system == 'tape' else None,
             tape_terminal_scalar=tape_scalar if reward_system == 'tape' else 1.0,
             tape_terminal_clip=tape_clip,
+            tape_terminal_bonus_mode=tape_bonus_mode if reward_system == 'tape' else 'signed',
+            tape_terminal_baseline=tape_baseline,
+            tape_terminal_neutral_band_enabled=tape_neutral_band_enabled,
+            tape_terminal_neutral_band_halfwidth=tape_neutral_band_halfwidth,
+            tape_terminal_gate_a_enabled=tape_gate_a_enabled if reward_system == 'tape' else False,
+            tape_terminal_gate_a_sharpe_threshold=tape_gate_a_sharpe_threshold,
+            tape_terminal_gate_a_max_drawdown=tape_gate_a_max_drawdown,
             dsr_window=dsr_window,
             dsr_scalar=dsr_scalar,
             target_turnover=target_turnover,
@@ -674,6 +688,17 @@ class TrainingSession:
                 episode_stats['tape_bonus_raw'] = float(tape_bonus_raw_val)
             else:
                 episode_stats['tape_bonus_raw'] = episode_stats['tape_bonus']
+            episode_stats['tape_gate_a_triggered'] = bool(step_info.get('tape_gate_a_triggered', False))
+            tape_gate_sharpe = step_info.get('tape_gate_a_sharpe')
+            tape_gate_mdd = step_info.get('tape_gate_a_max_drawdown_abs')
+            episode_stats['tape_gate_a_sharpe'] = float(tape_gate_sharpe) if tape_gate_sharpe is not None else np.nan
+            episode_stats['tape_gate_a_max_drawdown_abs'] = float(tape_gate_mdd) if tape_gate_mdd is not None else np.nan
+            episode_stats['tape_terminal_bonus_mode'] = step_info.get('tape_terminal_bonus_mode', '')
+            tape_baseline_val = step_info.get('tape_terminal_baseline')
+            episode_stats['tape_terminal_baseline'] = float(tape_baseline_val) if tape_baseline_val is not None else np.nan
+            episode_stats['tape_terminal_neutral_band_applied'] = bool(step_info.get('tape_terminal_neutral_band_applied', False))
+            tape_halfwidth_val = step_info.get('tape_terminal_neutral_band_halfwidth')
+            episode_stats['tape_terminal_neutral_band_halfwidth'] = float(tape_halfwidth_val) if tape_halfwidth_val is not None else np.nan
 
         if tape_score is not None:
             episode_stats['tape_score'] = float(tape_score)
@@ -736,6 +761,13 @@ class TrainingSession:
             'tape_score': episode_stats.get('tape_score', np.nan),
             'tape_bonus': episode_stats.get('tape_bonus', np.nan),
             'tape_bonus_raw': episode_stats.get('tape_bonus_raw', np.nan),
+            'tape_gate_a_triggered': episode_stats.get('tape_gate_a_triggered', False),
+            'tape_gate_a_sharpe': episode_stats.get('tape_gate_a_sharpe', np.nan),
+            'tape_gate_a_max_drawdown_abs': episode_stats.get('tape_gate_a_max_drawdown_abs', np.nan),
+            'tape_terminal_bonus_mode': episode_stats.get('tape_terminal_bonus_mode', ''),
+            'tape_terminal_baseline': episode_stats.get('tape_terminal_baseline', np.nan),
+            'tape_terminal_neutral_band_applied': episode_stats.get('tape_terminal_neutral_band_applied', False),
+            'tape_terminal_neutral_band_halfwidth': episode_stats.get('tape_terminal_neutral_band_halfwidth', np.nan),
             'profile_name': episode_stats.get('profile_name', '')
         }
         self.episode_stats_list.append(episode_entry)

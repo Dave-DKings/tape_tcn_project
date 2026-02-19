@@ -106,6 +106,13 @@ class PortfolioEnvTAPE(gym.Env):
                  tape_profile: Optional[Dict] = None,
                  tape_terminal_scalar: float = 1000.0,
                  tape_terminal_clip: Optional[float] = 5.0,
+                 tape_terminal_bonus_mode: str = 'signed',
+                 tape_terminal_baseline: float = 0.20,
+                 tape_terminal_neutral_band_enabled: bool = True,
+                 tape_terminal_neutral_band_halfwidth: float = 0.02,
+                 tape_terminal_gate_a_enabled: bool = False,
+                 tape_terminal_gate_a_sharpe_threshold: float = 0.0,
+                 tape_terminal_gate_a_max_drawdown: float = 0.25,
                  dsr_window: int = 60,
                  dsr_scalar: float = 5.0,
                  target_turnover: float = 0.76,  # Target turnover per day as decimal (0.76 = 76%)
@@ -147,6 +154,21 @@ class PortfolioEnvTAPE(gym.Env):
                 - Moderate scalar acts as final "nudge" rather than overwhelming signal
             tape_terminal_clip: Clip bounds for the terminal bonus (default: ±5.0)
                 - Set to None to disable clipping.
+            tape_terminal_bonus_mode: Terminal bonus transform mode (default: 'signed')
+                - 'current': bonus = tape_score * scalar
+                - 'centered': bonus = (tape_score - baseline) * scalar
+                - 'signed': maps tape_score around baseline to [-1, +1], then multiplies scalar
+            tape_terminal_baseline: Baseline tape score pivot for centered/signed modes (default: 0.20)
+            tape_terminal_neutral_band_enabled: Enable neutral zone around baseline (default: True)
+                - If enabled, terminal bonus becomes zero when score is close to baseline.
+            tape_terminal_neutral_band_halfwidth: Half-width of neutral zone around baseline (default: 0.02)
+                - Neutral zone is [baseline-halfwidth, baseline+halfwidth].
+            tape_terminal_gate_a_enabled: Enable Gate A terminal guardrail (default: False)
+                - If enabled, force terminal bonus non-positive when risk gate is breached.
+            tape_terminal_gate_a_sharpe_threshold: Sharpe threshold for Gate A (default: 0.0)
+                - Gate triggers when episode Sharpe <= this value.
+            tape_terminal_gate_a_max_drawdown: Max drawdown threshold (absolute decimal, default: 0.25)
+                - Gate triggers when episode max drawdown >= this value.
             dsr_window: Window size for Differential Sharpe Ratio calculation (default: 60)
                 - Number of recent returns to use for DSR computation
                 - Only used when reward_system='tape'
@@ -209,6 +231,19 @@ class PortfolioEnvTAPE(gym.Env):
             self.tape_profile = tape_profile
             self.tape_terminal_scalar = tape_terminal_scalar
             self.tape_terminal_clip = tape_terminal_clip
+            self.tape_terminal_bonus_mode = str(tape_terminal_bonus_mode).lower().strip()
+            if self.tape_terminal_bonus_mode not in {'current', 'centered', 'signed'}:
+                raise ValueError(
+                    "tape_terminal_bonus_mode must be one of "
+                    "{'current', 'centered', 'signed'}, "
+                    f"got '{tape_terminal_bonus_mode}'"
+                )
+            self.tape_terminal_baseline = float(np.clip(tape_terminal_baseline, 0.0, 1.0))
+            self.tape_terminal_neutral_band_enabled = bool(tape_terminal_neutral_band_enabled)
+            self.tape_terminal_neutral_band_halfwidth = float(max(0.0, tape_terminal_neutral_band_halfwidth))
+            self.tape_terminal_gate_a_enabled = bool(tape_terminal_gate_a_enabled)
+            self.tape_terminal_gate_a_sharpe_threshold = float(tape_terminal_gate_a_sharpe_threshold)
+            self.tape_terminal_gate_a_max_drawdown = float(max(0.0, tape_terminal_gate_a_max_drawdown))
             self.dsr_window = dsr_window
             self.dsr_scalar = dsr_scalar
             self.target_turnover = target_turnover
@@ -229,11 +264,35 @@ class PortfolioEnvTAPE(gym.Env):
                 f"   Component 3: Turnover Ceiling (max={target_turnover}, "
                 f"penalty_scalar={turnover_penalty_scalar})"
             )
-            logger.info(f"   Terminal: TAPE Score × {tape_terminal_scalar}")
+            logger.info(
+                "   Terminal: "
+                f"mode={self.tape_terminal_bonus_mode}, scalar={tape_terminal_scalar}, "
+                f"baseline={self.tape_terminal_baseline:.2f}"
+            )
+            if self.tape_terminal_neutral_band_enabled:
+                lower = self.tape_terminal_baseline - self.tape_terminal_neutral_band_halfwidth
+                upper = self.tape_terminal_baseline + self.tape_terminal_neutral_band_halfwidth
+                logger.info(
+                    "   Terminal Neutral Band: enabled "
+                    f"([{lower:.2f}, {upper:.2f}] -> bonus=0)"
+                )
+            if self.tape_terminal_gate_a_enabled:
+                logger.info(
+                    "   Terminal Gate A: enabled "
+                    f"(Sharpe <= {self.tape_terminal_gate_a_sharpe_threshold:.3f} "
+                    f"or MDD >= {self.tape_terminal_gate_a_max_drawdown*100:.2f}% -> force non-positive bonus)"
+                )
             logger.info(f"   Component 1 enabled: {self.enable_base_reward}")
         else:
             self.tape_profile = None
             self.tape_terminal_scalar = None
+            self.tape_terminal_bonus_mode = 'signed'
+            self.tape_terminal_baseline = 0.20
+            self.tape_terminal_neutral_band_enabled = True
+            self.tape_terminal_neutral_band_halfwidth = 0.02
+            self.tape_terminal_gate_a_enabled = False
+            self.tape_terminal_gate_a_sharpe_threshold = 0.0
+            self.tape_terminal_gate_a_max_drawdown = 0.25
             self.dsr_window = None
             self.dsr_scalar = None
             self.target_turnover = None
@@ -1157,6 +1216,8 @@ class PortfolioEnvTAPE(gym.Env):
             tape_score_final = None
             tape_bonus_final = None
             tape_bonus_raw_final = None
+            tape_gate_a_triggered = False
+            tape_neutral_band_applied = False
             if self.reward_system == 'tape':
                 # Calculate episode-level metrics for TAPE scoring
                 episode_metrics = calculate_episode_metrics(
@@ -1173,9 +1234,44 @@ class PortfolioEnvTAPE(gym.Env):
                     profile=self.tape_profile
                 )
                 
-                # Calculate terminal bonus (moderate scalar acts as final "nudge")
-                terminal_bonus = tape_score * self.tape_terminal_scalar
-                unclipped_bonus = terminal_bonus
+                # Calculate terminal bonus according to selected transform.
+                if self.tape_terminal_bonus_mode == 'centered':
+                    terminal_bonus = (float(tape_score) - self.tape_terminal_baseline) * self.tape_terminal_scalar
+                elif self.tape_terminal_bonus_mode == 'signed':
+                    if float(tape_score) >= self.tape_terminal_baseline:
+                        denom = max(1e-9, 1.0 - self.tape_terminal_baseline)
+                        signed_tape = (float(tape_score) - self.tape_terminal_baseline) / denom
+                    else:
+                        denom = max(1e-9, self.tape_terminal_baseline)
+                        signed_tape = -((self.tape_terminal_baseline - float(tape_score)) / denom)
+                    signed_tape = float(np.clip(signed_tape, -1.0, 1.0))
+                    terminal_bonus = signed_tape * self.tape_terminal_scalar
+                else:
+                    # 'current' mode: legacy behavior
+                    terminal_bonus = float(tape_score) * self.tape_terminal_scalar
+
+                if self.tape_terminal_neutral_band_enabled:
+                    if abs(float(tape_score) - self.tape_terminal_baseline) <= self.tape_terminal_neutral_band_halfwidth:
+                        terminal_bonus = 0.0
+                        tape_neutral_band_applied = True
+
+                gate_sharpe = float(episode_metrics.get('sharpe_ratio', 0.0))
+                gate_mdd_abs = float(
+                    episode_metrics.get(
+                        'max_drawdown_abs',
+                        abs(float(episode_metrics.get('max_drawdown', 0.0)))
+                    )
+                )
+                if self.tape_terminal_gate_a_enabled:
+                    gate_hit = (
+                        gate_sharpe <= self.tape_terminal_gate_a_sharpe_threshold
+                        or gate_mdd_abs >= self.tape_terminal_gate_a_max_drawdown
+                    )
+                    if gate_hit:
+                        terminal_bonus = -abs(float(terminal_bonus))
+                        tape_gate_a_triggered = True
+
+                unclipped_bonus = float(terminal_bonus)
                 if self.tape_terminal_clip is not None:
                     terminal_bonus = float(np.clip(
                         terminal_bonus,
@@ -1194,7 +1290,20 @@ class PortfolioEnvTAPE(gym.Env):
                 tape_bonus_raw_final = float(unclipped_bonus)
                 
                 logger.info(f"🎯 TAPE Terminal Bonus")
-                logger.info(f"   TAPE Score: {tape_score:.4f} × {self.tape_terminal_scalar} = {terminal_bonus:.2f}")
+                logger.info(
+                    f"   Mode={self.tape_terminal_bonus_mode}, baseline={self.tape_terminal_baseline:.2f}, "
+                    f"TAPE Score={tape_score:.4f}, bonus={terminal_bonus:.2f}"
+                )
+                if tape_neutral_band_applied:
+                    logger.info(
+                        "   Neutral band applied: "
+                        f"|score-baseline| <= {self.tape_terminal_neutral_band_halfwidth:.3f} -> bonus=0"
+                    )
+                if tape_gate_a_triggered:
+                    logger.info(
+                        "   Gate A triggered: forcing non-positive terminal bonus "
+                        f"(Sharpe={gate_sharpe:.3f}, MDD={gate_mdd_abs*100:.2f}%)"
+                    )
                 logger.info(f"   Metrics: Sharpe={episode_metrics.get('sharpe_ratio', 0):.3f}, "
                           f"Sortino={episode_metrics.get('sortino_ratio', 0):.3f}, "
                           f"MDD={episode_metrics.get('max_drawdown', 0)*100:.2f}%, "
@@ -1240,6 +1349,9 @@ class PortfolioEnvTAPE(gym.Env):
                 
                 # For simple system, set dummy value for TAPE score
                 tape_score_final = None
+                tape_neutral_band_applied = False
+                gate_sharpe = None
+                gate_mdd_abs = None
             
             info = {
                 'portfolio_value': self.portfolio_value,
@@ -1259,6 +1371,14 @@ class PortfolioEnvTAPE(gym.Env):
                 'tape_score': tape_score_final,  # TAPE score 0-1 (or None if simple system)
                 'tape_bonus': tape_bonus_final,
                 'tape_bonus_raw': tape_bonus_raw_final,
+                'tape_terminal_bonus_mode': self.tape_terminal_bonus_mode if self.reward_system == 'tape' else None,
+                'tape_terminal_baseline': float(self.tape_terminal_baseline) if self.reward_system == 'tape' else None,
+                'tape_terminal_neutral_band_enabled': bool(self.tape_terminal_neutral_band_enabled) if self.reward_system == 'tape' else None,
+                'tape_terminal_neutral_band_halfwidth': float(self.tape_terminal_neutral_band_halfwidth) if self.reward_system == 'tape' else None,
+                'tape_terminal_neutral_band_applied': bool(tape_neutral_band_applied),
+                'tape_gate_a_triggered': bool(tape_gate_a_triggered),
+                'tape_gate_a_sharpe': float(gate_sharpe) if gate_sharpe is not None else None,
+                'tape_gate_a_max_drawdown_abs': float(gate_mdd_abs) if gate_mdd_abs is not None else None,
                 'intra_step_tape_potential': self.last_intra_step_tape_potential,
                 'intra_step_tape_delta_reward': self.last_intra_step_tape_delta_reward,
                 'termination_reason': 'episode_limit' if limit_hit else 'data_exhausted',

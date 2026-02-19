@@ -352,6 +352,13 @@ PHASE1_CONFIG = {
         "initial_cash_position": 0.05,
         "tape_terminal_scalar": 10.0,
         "tape_terminal_clip": 10.0,
+        "tape_terminal_bonus_mode": "signed",
+        "tape_terminal_baseline": 0.20,
+        "tape_terminal_neutral_band_enabled": True,
+        "tape_terminal_neutral_band_halfwidth": 0.02,
+        "tape_terminal_gate_a_enabled": True,
+        "tape_terminal_gate_a_sharpe_threshold": 0.0,
+        "tape_terminal_gate_a_max_drawdown": 0.25,
         "target_turnover": 0.60,  # Relax early ceiling; tighten via curriculum as policy stabilizes
         "turnover_penalty_scalar": 2.0,
         "turnover_target_band": 0.20,
@@ -521,8 +528,8 @@ PHASE1_CONFIG = {
             "max_turnover": 0.80,     # 80% daily turnover
             "top_n": 5
         },
-        # TAPE checkpoint trigger uses clipped bonus scale (tape_score * 10).
-        # 4.0 means raw tape_score >= 0.40.
+        # TAPE checkpoint trigger uses clipped terminal-bonus scale.
+        # With signed mode + baseline 0.20 + scalar 10, 4.0 ~= tape_score >= 0.52.
         "tape_checkpoint_threshold": 4.0,
         # Periodic safety snapshots independent of TAPE threshold.
         "periodic_checkpoint_every_steps": 10_000,
@@ -597,6 +604,13 @@ PHASE2_CONFIG = {
         "initial_allocation_mode": "equal_assets_with_min_cash",
         "initial_cash_position": 0.05,
         "target_turnover": 0.60,  # Relax early ceiling; tighten via curriculum as policy stabilizes
+        "tape_terminal_bonus_mode": "signed",
+        "tape_terminal_baseline": 0.20,
+        "tape_terminal_neutral_band_enabled": True,
+        "tape_terminal_neutral_band_halfwidth": 0.02,
+        "tape_terminal_gate_a_enabled": True,
+        "tape_terminal_gate_a_sharpe_threshold": 0.0,
+        "tape_terminal_gate_a_max_drawdown": 0.25,
         "turnover_penalty_scalar": 2.0,
         "turnover_target_band": 0.20,
         "dsr_scalar": 2.0,  # Further reduce PBRS noise while policy is unstable
@@ -784,7 +798,8 @@ PHASE2_CONFIG = {
             "max_turnover": 0.80,     # 80% daily turnover
             "top_n": 5
         },
-        # TAPE checkpoint trigger uses clipped bonus scale (tape_score * 10).
+        # TAPE checkpoint trigger uses clipped terminal-bonus scale.
+        # With signed mode + baseline 0.20 + scalar 10, 4.0 ~= tape_score >= 0.52.
         "tape_checkpoint_threshold": 4.0,
         # Periodic safety snapshots independent of TAPE threshold.
         "periodic_checkpoint_every_steps": 10_000,
