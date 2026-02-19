@@ -21,14 +21,17 @@ ALPHA_VANTAGE_API_KEY = "GETO31F8UHB3OWB3"
 
 # --- DATA DATE RANGES ---
 DATA_FETCH_START_DATE = "2003-09-02"  # Paper-aligned start
-DATA_FETCH_END_DATE = "2024-09-01"  # Extended to keep ~3 years of test data
+DATA_FETCH_END_DATE = "2025-09-01"  # Extended test horizon
 ANALYSIS_START_DATE = "2003-09-02"
-ANALYSIS_END_DATE = "2024-09-01"
+ANALYSIS_END_DATE = "2025-09-01"
 
 # --- TRAIN/TEST SPLIT ---
-# Fixed date split aligned to the multimodal DRL paper window for training.
-# Training ends 2021-09-01; testing starts 2021-09-02 and runs to 2024-09-01.
-TRAIN_TEST_SPLIT_DATE = "2021-09-01"  # Last day of training data
+# Two supported split presets:
+# - Benchmark (paper-aligned train cutoff)
+# - COVID stress test (test starts 2020-01-01)
+TRAIN_TEST_SPLIT_DATE_BENCHMARK = "2021-09-01"     # Train: <= 2021-09-01
+TRAIN_TEST_SPLIT_DATE_COVID_STRESS = "2019-12-31"  # Train: <= 2019-12-31
+TRAIN_TEST_SPLIT_DATE = TRAIN_TEST_SPLIT_DATE_BENCHMARK
 
 # --- ASSET CONFIGURATION ---
 ASSET_TICKERS = ["MSFT", "GOOGL", "JPM", "JNJ", "XOM", "PG", "NEE", "LIN", "CAT", "UNH"] 
