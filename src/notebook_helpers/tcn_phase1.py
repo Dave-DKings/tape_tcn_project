@@ -31,6 +31,8 @@ from src.data_utils import DataProcessor
 from src.environment_tape_rl import PortfolioEnvTAPE
 from src.reward_utils import calculate_episode_metrics
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 
 def _extract_turnover_metrics(metrics: Dict[str, Any]) -> Tuple[float, float]:
     """Return turnover as decimal and percentage."""
@@ -286,16 +288,18 @@ def _get_results_root_for_architecture(
     architecture: str,
     use_attention: bool = False,
     use_fusion: bool = False,
+    project_root: Optional[Union[str, Path]] = None,
 ) -> Path:
     """Return the base results directory for the given architecture."""
+    base_dir = Path(project_root) if project_root is not None else PROJECT_ROOT
     arch_upper = architecture.upper()
     if arch_upper.startswith("TCN"):
         if use_fusion or arch_upper == "TCN_FUSION":
-            return Path("tcn_fusion_results")
+            return base_dir / "tcn_fusion_results"
         if use_attention or arch_upper == "TCN_ATTENTION":
-            return Path("tcn_att_results")
-        return Path("tcn_results")
-    return Path("results")
+            return base_dir / "tcn_att_results"
+        return base_dir / "tcn_results"
+    return base_dir / "results"
 
 def _infer_attention_from_checkpoint_path(path_like: Union[str, Path]) -> bool:
     """Return True if checkpoint path suggests TCN+Attention weights."""
@@ -790,6 +794,7 @@ def create_experiment6_result_stub(
         architecture_upper,
         use_attention=use_attention_flag,
         use_fusion=use_fusion_flag,
+        project_root=PROJECT_ROOT,
     )
 
     if checkpoint_path:
@@ -807,6 +812,7 @@ def create_experiment6_result_stub(
                     architecture_upper,
                     use_attention=not use_attention_flag,
                     use_fusion=use_fusion_flag,
+                    project_root=PROJECT_ROOT,
                 )
             )
             for alt_root in fallback_roots:
@@ -820,6 +826,7 @@ def create_experiment6_result_stub(
                             architecture_upper,
                             use_attention=True,
                             use_fusion=use_fusion_flag,
+                            project_root=PROJECT_ROOT,
                         )
                         results_root = alt_root
                     break
@@ -1123,8 +1130,8 @@ def prepare_phase1_dataset(
         print(f"⚠️ Missing features before normalisation: {missing_cols}")
 
     # Filter to analysis date range BEFORE splitting
-    analysis_start = config.get('ANALYSIS_START_DATE', '2011-01-01')
-    analysis_end = config.get('ANALYSIS_END_DATE', '2025-11-30')
+    analysis_start = config.get('ANALYSIS_START_DATE', '2003-09-02')
+    analysis_end = config.get('ANALYSIS_END_DATE', '2024-09-01')
     
     print("\n" + "="*80)
     print("✂️ FILTERING TO ANALYSIS PERIOD")
@@ -1385,6 +1392,7 @@ def run_experiment6_tape(
         arch_upper,
         use_attention=use_attention_flag,
         use_fusion=use_fusion_flag,
+        project_root=PROJECT_ROOT,
     )
     results_root.mkdir(parents=True, exist_ok=True)
 
@@ -1397,6 +1405,8 @@ def run_experiment6_tape(
     elif arch_upper.startswith("TCN") and use_attention_flag:
         architecture_label = "TCN + Attention"
     print(f"Architecture: {architecture_label}")
+    print(f"Results root: {results_root.resolve()}")
+    print(f"Working dir: {Path.cwd().resolve()}")
     print(f"Covariance Features: {'Yes' if use_covariance else 'No'}")
     print(f"🎯 REWARD SYSTEM: TAPE (Three-Component v3)")
     print(f"   Profile: {profile.get('name', 'BALANCED_GROWTH') if isinstance(profile, dict) else 'BALANCED_GROWTH'}")
@@ -1916,7 +1926,7 @@ def run_experiment6_tape(
     }
     with open(feature_manifest_path, "w", encoding="utf-8") as f:
         json.dump(active_feature_manifest, f, indent=2, default=str)
-    print(f"🧾 Active feature manifest saved: {feature_manifest_path}")
+    print(f"🧾 Active feature manifest saved: {feature_manifest_path.resolve()}")
 
     feature_params = config.get("feature_params", {})
     fundamental_cfg = feature_params.get("fundamental_features", {}) if isinstance(feature_params, dict) else {}
@@ -2033,7 +2043,7 @@ def run_experiment6_tape(
     }
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, default=str)
-    print(f"🧾 Training metadata saved: {metadata_path}")
+    print(f"🧾 Training metadata saved: {metadata_path.resolve()}")
 
 
     train_start = time.time()

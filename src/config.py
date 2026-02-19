@@ -20,14 +20,15 @@ PATH_PROCESSED_MACRO_DAILY_ALIGNED = os.path.join(BASE_DATA_PATH, "processed_dai
 ALPHA_VANTAGE_API_KEY = "GETO31F8UHB3OWB3"
 
 # --- DATA DATE RANGES ---
-DATA_FETCH_START_DATE = "2006-01-01"
-DATA_FETCH_END_DATE = "2025-12-31"  # Extended to include December 2025
-ANALYSIS_START_DATE = "2008-01-01"
-ANALYSIS_END_DATE = "2025-12-31"  # Extended analysis window for full 2025 coverage
+DATA_FETCH_START_DATE = "2003-09-02"  # Paper-aligned start
+DATA_FETCH_END_DATE = "2024-09-01"  # Extended to keep ~3 years of test data
+ANALYSIS_START_DATE = "2003-09-02"
+ANALYSIS_END_DATE = "2024-09-01"
 
 # --- TRAIN/TEST SPLIT ---
-# Fixed date split: Training ends 2019-12-31, Testing starts 2020-01-01 and runs to 2025-12-31
-TRAIN_TEST_SPLIT_DATE = "2019-12-31"  # Last day of training data
+# Fixed date split aligned to the multimodal DRL paper window for training.
+# Training ends 2021-09-01; testing starts 2021-09-02 and runs to 2024-09-01.
+TRAIN_TEST_SPLIT_DATE = "2021-09-01"  # Last day of training data
 
 # --- ASSET CONFIGURATION ---
 ASSET_TICKERS = ["MSFT", "GOOGL", "JPM", "JNJ", "XOM", "PG", "NEE", "LIN", "CAT", "UNH"] 
@@ -98,6 +99,9 @@ PHASE12_REDUNDANT_FEATURES_TO_DISABLE = [
     "LowBeta_Flag",
     "EFFR_level",
     "FEDFUNDS_level",
+    # Legacy macro outputs retained in some metadata snapshots; prune explicitly.
+    "ISM_MAN_PMI_level",
+    "ISM_MAN_PMI_diff",
 ]
 
 FEATURES_TO_DISABLE = [
@@ -348,10 +352,10 @@ PHASE1_CONFIG = {
         "initial_cash_position": 0.05,
         "tape_terminal_scalar": 10.0,
         "tape_terminal_clip": 10.0,
-        "target_turnover": 0.40,  # Tightened ceiling to reduce churn and improve risk-adjusted stability
+        "target_turnover": 0.60,  # Relax early ceiling; tighten via curriculum as policy stabilizes
         "turnover_penalty_scalar": 2.0,
         "turnover_target_band": 0.20,
-        "dsr_scalar": 3.0,  # Lowered to reduce reward dominance/noise
+        "dsr_scalar": 2.0,  # Further reduce PBRS noise while policy is unstable
         "concentration_penalty_scalar": 2.0,
         "concentration_target_hhi": 0.14,
         "top_weight_penalty_scalar": 1.5,
@@ -361,7 +365,7 @@ PHASE1_CONFIG = {
         "intra_step_tape_delta_enabled": True,
         "intra_step_tape_delta_window": 60,
         "intra_step_tape_delta_min_history": 20,
-        "intra_step_tape_delta_beta": 0.03,
+        "intra_step_tape_delta_beta": 0.01,
         "intra_step_tape_delta_clip": 0.20,
         "dd_regime_scaling": {
             "enabled": True,
@@ -376,7 +380,7 @@ PHASE1_CONFIG = {
             "enabled": True,
             "target": 0.18,
             "penalty_coef": 1.5,
-            "dual_learning_rate": 0.40,
+            "dual_learning_rate": 0.10,
             "lambda_init": 0.50,
             "lambda_floor": 0.0,
             "lambda_max": 5.0,
@@ -444,10 +448,11 @@ PHASE1_CONFIG = {
         # PPO Algorithm parameters
         # Stabilized PPO regime for better out-of-sample Sharpe retention.
         "ppo_params": {
-            "gamma": 0.99, "gae_lambda": 0.9, "policy_clip": 0.15,
-            "entropy_coef": 0.01, "vf_coef": 0.5, "num_ppo_epochs": 6,
-            "batch_size_ppo": 252, "actor_lr": 0.00003, "critic_lr": 0.0005,
-            "max_grad_norm": 0.5, "value_clip": 0.2, "target_kl": 0.02
+            "gamma": 0.99, "gae_lambda": 0.9, "policy_clip": 0.10,
+            "entropy_coef": 0.01, "vf_coef": 0.5, "num_ppo_epochs": 4,
+            "batch_size_ppo": 252, "actor_lr": 0.00002, "critic_lr": 0.0003,
+            "max_grad_norm": 0.5, "value_clip": 0.2, "target_kl": 0.015,
+            "kl_stop_multiplier": 1.2, "minibatches_before_kl_stop": 1
         },
     },
     #================================================
@@ -483,8 +488,8 @@ PHASE1_CONFIG = {
             {"name": "all", "timesteps_fraction": 0.30}          # Final 30% on all data
         ],
 
-        # Toggle for curriculum-based episode length scheduling
-        "use_episode_length_curriculum": True,
+        # Disable episode-length curriculum: use full dataset horizon throughout.
+        "use_episode_length_curriculum": False,
         "episode_length_curriculum_schedule": [
             {"threshold": 0, "limit": 1500},
             {"threshold": 30_000, "limit": 2000},
@@ -531,8 +536,8 @@ PHASE1_CONFIG = {
         # Actor LR schedule (canonical across project).
         # Starts conservative, then decays further for stability.
         "actor_lr_schedule": [
-            {"threshold": 0, "lr": 0.00003},
-            {"threshold": 40_000, "lr": 0.00002},
+            {"threshold": 0, "lr": 0.00002},
+            {"threshold": 40_000, "lr": 0.000015},
             {"threshold": 70_000, "lr": 0.00001},
         ],
 
@@ -591,10 +596,10 @@ PHASE2_CONFIG = {
         "done_on_balance_threshold_pct": 0.5,
         "initial_allocation_mode": "equal_assets_with_min_cash",
         "initial_cash_position": 0.05,
-        "target_turnover": 0.40,  # Tightened ceiling to reduce churn
+        "target_turnover": 0.60,  # Relax early ceiling; tighten via curriculum as policy stabilizes
         "turnover_penalty_scalar": 2.0,
         "turnover_target_band": 0.20,
-        "dsr_scalar": 3.0,  # Lowered to reduce reward volatility
+        "dsr_scalar": 2.0,  # Further reduce PBRS noise while policy is unstable
         "concentration_penalty_scalar": 2.0,
         "concentration_target_hhi": 0.14,
         "top_weight_penalty_scalar": 1.5,
@@ -604,7 +609,7 @@ PHASE2_CONFIG = {
         "intra_step_tape_delta_enabled": True,
         "intra_step_tape_delta_window": 60,
         "intra_step_tape_delta_min_history": 20,
-        "intra_step_tape_delta_beta": 0.03,
+        "intra_step_tape_delta_beta": 0.01,
         "intra_step_tape_delta_clip": 0.20,
         "dd_regime_scaling": {
             "enabled": True,
@@ -619,7 +624,7 @@ PHASE2_CONFIG = {
             "enabled": True,
             "target": 0.18,
             "penalty_coef": 1.5,
-            "dual_learning_rate": 0.40,
+            "dual_learning_rate": 0.10,
             "lambda_init": 0.50,
             "lambda_floor": 0.0,
             "lambda_max": 5.0,
@@ -631,7 +636,7 @@ PHASE2_CONFIG = {
         "drawdown_constraint_overrides": {
             "sequential": {
                 "penalty_coef": 1.5,
-                "dual_learning_rate": 0.40,
+                "dual_learning_rate": 0.10,
                 "lambda_floor": 0.0,
                 "lambda_max": 5.0,
                 "tolerance": -0.015,
@@ -696,10 +701,11 @@ PHASE2_CONFIG = {
         
         # PPO Algorithm parameters
         "ppo_params": {
-            "gamma": 0.99, "gae_lambda": 0.9, "policy_clip": 0.15,
-            "entropy_coef": 0.01, "vf_coef": 0.5, "num_ppo_epochs": 3,
-            "batch_size_ppo": 256, "actor_lr": 0.00003, "critic_lr": 0.0005,
-            "max_grad_norm": 0.5, "value_clip": 0.2, "target_kl": 0.03
+            "gamma": 0.99, "gae_lambda": 0.9, "policy_clip": 0.10,
+            "entropy_coef": 0.01, "vf_coef": 0.5, "num_ppo_epochs": 4,
+            "batch_size_ppo": 256, "actor_lr": 0.00002, "critic_lr": 0.0003,
+            "max_grad_norm": 0.5, "value_clip": 0.2, "target_kl": 0.015,
+            "kl_stop_multiplier": 1.2, "minibatches_before_kl_stop": 1
         },
     },
     #================================================
@@ -708,7 +714,7 @@ PHASE2_CONFIG = {
         "timesteps_per_ppo_update": 250,
         "log_interval_episodes": 10,
         "save_freq_episodes": 50,
-        "max_episode_length": 60,  # Maximum steps per episode (~3 months of trading)
+        "max_episode_length": None,  # Use full dataset horizon
 
         # STATE-OF-THE-ART FIX #2: Stronger Entropy Incentive
         "entropy_coefficient": 0.10,  # Diversification bonus weight (10x stronger for meaningful impact)
@@ -725,8 +731,8 @@ PHASE2_CONFIG = {
             {"name": "all", "timesteps_fraction": 0.30}          # Final 30% on all data
         ],
 
-        # Episode-length curriculum (mirrors Phase 1 timeline)
-        "use_episode_length_curriculum": True,
+        # Disable episode-length curriculum: use full dataset horizon throughout.
+        "use_episode_length_curriculum": False,
         "episode_length_curriculum_schedule": [
             {"threshold": 0, "limit": 504},
             {"threshold": 15_000, "limit": 756},
@@ -747,8 +753,8 @@ PHASE2_CONFIG = {
 
         # Actor LR decay schedule (critic stays constant)
         "actor_lr_schedule": [
-            {"threshold": 0, "lr": 0.00003},
-            {"threshold": 40_000, "lr": 0.00002},
+            {"threshold": 0, "lr": 0.00002},
+            {"threshold": 40_000, "lr": 0.000015},
             {"threshold": 70_000, "lr": 0.00001},
         ],
 

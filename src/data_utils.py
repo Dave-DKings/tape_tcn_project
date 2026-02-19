@@ -265,8 +265,8 @@ class DataProcessor:
                 cached_max_date = df_cached[self.date_col].max()
                 
                 # Determine requested date range
-                requested_start = pd.to_datetime(start_date) if start_date else pd.to_datetime(self.config.get('DATA_FETCH_START_DATE', '2009-01-01'))
-                requested_end = pd.to_datetime(end_date) if end_date else pd.to_datetime(self.config.get('DATA_FETCH_END_DATE', '2025-11-30'))
+                requested_start = pd.to_datetime(start_date) if start_date else pd.to_datetime(self.config.get('DATA_FETCH_START_DATE', '2003-09-02'))
+                requested_end = pd.to_datetime(end_date) if end_date else pd.to_datetime(self.config.get('DATA_FETCH_END_DATE', '2024-09-01'))
                 
                 # Validate cache covers requested date range and ticker universe
                 cache_valid = (cached_min_date <= requested_start) and (cached_max_date >= requested_end)
