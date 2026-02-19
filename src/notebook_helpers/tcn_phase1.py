@@ -656,6 +656,29 @@ EVALUATION_FIELDNAMES: List[str] = TRAINING_FIELDNAMES + [
     name for name in EVALUATION_EXTRA_FIELDNAMES if name not in TRAINING_FIELDNAMES
 ]
 
+STEP_DIAGNOSTIC_FIELDNAMES: List[str] = [
+    "update",
+    "timestep",
+    "episode",
+    "episode_step",
+    "date",
+    "elapsed_time",
+    "reward_total",
+    "portfolio_return_pct_points",
+    "portfolio_value",
+    "prev_portfolio_value",
+    "l1_w_delta",
+    "turnover",
+    "turnover_target",
+    "turnover_scalar",
+    "turnover_penalty_contrib",
+    "transaction_cost_dollars",
+    "tx_cost_contrib_reward_pts",
+    "action_realization_l1",
+    "action_realization_penalty",
+    "drawdown_penalty",
+]
+
 
 def _build_training_metrics_row(
     metrics: Dict[str, Any],
@@ -1803,14 +1826,23 @@ def run_experiment6_tape(
     training_episodes_path = log_dir / f"{training_log_prefix}_episodes.csv"
     training_summary_path = log_dir / f"{training_log_prefix}_summary.csv"
     training_custom_path = log_dir / f"{training_log_prefix}_custom_summary.csv"
+    step_diagnostics_path = log_dir / f"{training_log_prefix}_step_diagnostics.csv"
 
     training_fieldnames = TRAINING_FIELDNAMES
+    step_diagnostics_enabled = bool(training_params.get("log_step_diagnostics", True))
 
     train_csv_logger = (
         logger_cls(training_episodes_path, fieldnames=training_fieldnames) if logger_cls else None
     )
+    step_diag_csv_logger = (
+        logger_cls(step_diagnostics_path, fieldnames=STEP_DIAGNOSTIC_FIELDNAMES)
+        if logger_cls and step_diagnostics_enabled
+        else None
+    )
     training_rows: List[Dict[str, Any]] = []
     print(f"📊 Training metrics will stream to {training_episodes_path}")
+    if step_diagnostics_enabled:
+        print(f"🧪 Step diagnostics will stream to {step_diagnostics_path}")
 
     num_updates = max_total_timesteps // timesteps_per_update
 
@@ -2090,6 +2122,7 @@ def run_experiment6_tape(
             "test_date_min": str(experiment_test_df["Date"].min()),
             "test_date_max": str(experiment_test_df["Date"].max()),
             "active_feature_manifest_path": str(feature_manifest_path),
+            "step_diagnostics_path": str(step_diagnostics_path) if step_diagnostics_enabled else None,
         },
         "Architecture_Settings": {
             "architecture": arch_upper,
@@ -2125,6 +2158,7 @@ def run_experiment6_tape(
             "episode_length_limit_initial": episode_horizon_start,
             "turnover_penalty_curriculum": turnover_curriculum,
             "evaluation_turnover_penalty_scalar": eval_turnover_scalar,
+            "log_step_diagnostics": bool(step_diagnostics_enabled),
             "gamma": gamma_cfg,
         },
         "Reward_and_Environment": {
@@ -2230,6 +2264,7 @@ def run_experiment6_tape(
 
         for _ in range(timesteps_per_update):
             action, log_prob, value = agent.get_action_and_value(obs, deterministic=False)
+            prev_portfolio_value = float(getattr(env_train, "portfolio_value", np.nan))
             next_obs, reward, done, truncated, info = env_train.step(action)
 
             agent.store_transition(obs, action, log_prob, reward, value, done)
@@ -2241,6 +2276,44 @@ def run_experiment6_tape(
                 current_actor_lr = new_actor_lr
                 agent.set_actor_lr(current_actor_lr)
                 print(f"   🔧 Actor learning rate adjusted to {current_actor_lr:.6f} at step {step:,}")
+
+            if step_diag_csv_logger is not None:
+                turnover_val = float(info.get("turnover", 0.0) or 0.0)
+                turnover_target = float(getattr(env_train, "target_turnover_per_step", 0.0) or 0.0)
+                turnover_scalar_live = float(getattr(env_train, "turnover_penalty_scalar", 0.0) or 0.0)
+                if turnover_target > 0.0 and turnover_val > turnover_target:
+                    excess_ratio = (turnover_val - turnover_target) / max(turnover_target, 1e-8)
+                    turnover_penalty_contrib = -excess_ratio * turnover_scalar_live
+                else:
+                    turnover_penalty_contrib = 0.0
+
+                tx_cost_dollars = float(info.get("transaction_costs", 0.0) or 0.0)
+                tx_cost_denom = max(prev_portfolio_value, 1e-8)
+                tx_cost_contrib_reward_pts = -(tx_cost_dollars / tx_cost_denom) * 100.0
+
+                step_diag_row = {
+                    "update": update + 1,
+                    "timestep": step,
+                    "episode": training_episode_count,
+                    "episode_step": int(info.get("episode_step", getattr(env_train, "episode_step_count", 0)) or 0),
+                    "date": info.get("date"),
+                    "elapsed_time": time.time() - train_start,
+                    "reward_total": float(reward),
+                    "portfolio_return_pct_points": float(info.get("portfolio_return", 0.0) or 0.0) * 100.0,
+                    "portfolio_value": float(info.get("portfolio_value", getattr(env_train, "portfolio_value", np.nan))),
+                    "prev_portfolio_value": float(prev_portfolio_value),
+                    "l1_w_delta": turnover_val,
+                    "turnover": turnover_val,
+                    "turnover_target": turnover_target,
+                    "turnover_scalar": turnover_scalar_live,
+                    "turnover_penalty_contrib": float(turnover_penalty_contrib),
+                    "transaction_cost_dollars": tx_cost_dollars,
+                    "tx_cost_contrib_reward_pts": float(tx_cost_contrib_reward_pts),
+                    "action_realization_l1": float(info.get("action_realization_l1", 0.0) or 0.0),
+                    "action_realization_penalty": float(info.get("action_realization_penalty", 0.0) or 0.0),
+                    "drawdown_penalty": float(info.get("drawdown_penalty", 0.0) or 0.0),
+                }
+                step_diag_csv_logger.log(step_diag_row)
 
             maybe_save_step_sharpe_checkpoint(
                 current_step=step,
@@ -2711,6 +2784,8 @@ def run_experiment6_tape(
 
     if train_csv_logger is not None:
         train_csv_logger.close()
+    if step_diag_csv_logger is not None:
+        step_diag_csv_logger.close()
 
     checkpoint_prefix_path = _next_incremental_checkpoint_prefix(results_root, exp_idx)
     agent.save_models(str(checkpoint_prefix_path))
