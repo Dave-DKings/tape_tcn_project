@@ -1010,7 +1010,14 @@ def load_training_metadata_into_config(
         raw_curr = train_meta.get("turnover_penalty_curriculum", {})
         if isinstance(raw_curr, dict):
             training_params["turnover_penalty_curriculum"] = _to_int_key_dict(raw_curr)
-    for key in ("max_total_timesteps", "timesteps_per_ppo_update", "evaluation_turnover_penalty_scalar"):
+    for key in (
+        "max_total_timesteps",
+        "timesteps_per_ppo_update",
+        "timesteps_per_ppo_update_schedule",
+        "batch_size_ppo",
+        "batch_size_ppo_schedule",
+        "evaluation_turnover_penalty_scalar",
+    ):
         if key in train_meta:
             training_params[key] = copy.deepcopy(train_meta[key])
     if "use_episode_length_curriculum" in train_meta:
@@ -1056,7 +1063,10 @@ def load_training_metadata_into_config(
         print(f"   Architecture: {agent_params.get('actor_critic_type')}")
         print(f"   Turnover target: {env_params.get('target_turnover')}")
         print(f"   DSR scalar: {env_params.get('dsr_scalar')}")
-        print(f"   PPO update timesteps: {training_params.get('timesteps_per_ppo_update')}")
+        if training_params.get("timesteps_per_ppo_update_schedule"):
+            print("   PPO update timesteps: scheduled")
+        else:
+            print(f"   PPO update timesteps: {training_params.get('timesteps_per_ppo_update')}")
         print(f"   Episode length curriculum: {training_params.get('use_episode_length_curriculum')}")
         print(f"   Profile override loaded: {'tape_profile_override' in env_params}")
         print(
@@ -1445,6 +1455,52 @@ def run_experiment6_tape(
         if max_total_timesteps is not None
         else training_params.get("max_total_timesteps", 100_000)
     )
+    raw_timestep_schedule_cfg = training_params.get("timesteps_per_ppo_update_schedule", [])
+    timestep_update_schedule: List[Dict[str, int]] = []
+    if isinstance(raw_timestep_schedule_cfg, dict):
+        for threshold_raw, rollout_len_raw in raw_timestep_schedule_cfg.items():
+            threshold = int(threshold_raw)
+            rollout_len = int(rollout_len_raw)
+            if rollout_len <= 0:
+                continue
+            timestep_update_schedule.append(
+                {"threshold": threshold, "timesteps_per_update": rollout_len}
+            )
+    elif isinstance(raw_timestep_schedule_cfg, list):
+        for entry in raw_timestep_schedule_cfg:
+            if not isinstance(entry, dict):
+                continue
+            threshold = int(entry.get("threshold", 0))
+            rollout_len = entry.get("timesteps_per_update", entry.get("timesteps", entry.get("value")))
+            if rollout_len is None:
+                continue
+            rollout_len = int(rollout_len)
+            if rollout_len <= 0:
+                continue
+            timestep_update_schedule.append(
+                {"threshold": threshold, "timesteps_per_update": rollout_len}
+            )
+    if not timestep_update_schedule:
+        timestep_update_schedule = [{"threshold": 0, "timesteps_per_update": timesteps_per_update}]
+    else:
+        schedule_by_threshold: Dict[int, int] = {}
+        for entry in sorted(timestep_update_schedule, key=lambda item: item["threshold"]):
+            schedule_by_threshold[int(entry["threshold"])] = int(entry["timesteps_per_update"])
+        if 0 not in schedule_by_threshold:
+            schedule_by_threshold[0] = timesteps_per_update
+        timestep_update_schedule = [
+            {"threshold": int(threshold), "timesteps_per_update": int(value)}
+            for threshold, value in sorted(schedule_by_threshold.items(), key=lambda item: item[0])
+        ]
+
+    def determine_timesteps_per_update(current_step: int) -> int:
+        active_rollout = timestep_update_schedule[0]["timesteps_per_update"]
+        for entry in timestep_update_schedule:
+            if current_step >= entry["threshold"]:
+                active_rollout = entry["timesteps_per_update"]
+            else:
+                break
+        return max(1, int(active_rollout))
 
     arch_upper = architecture.upper()
     use_attention_flag = bool(config.get("agent_params", {}).get("use_attention", False))
@@ -1789,9 +1845,65 @@ def run_experiment6_tape(
     num_ppo_epochs = int(
         training_params.get("num_ppo_epochs", ppo_params_cfg.get("num_ppo_epochs", 10))
     )
-    batch_size_ppo = int(
+    batch_size_ppo_base = int(
         training_params.get("batch_size_ppo", ppo_params_cfg.get("batch_size_ppo", 64))
     )
+    raw_batch_size_schedule_cfg = training_params.get("batch_size_ppo_schedule", [])
+    batch_size_schedule: List[Dict[str, int]] = []
+    if isinstance(raw_batch_size_schedule_cfg, dict):
+        for threshold_raw, batch_raw in raw_batch_size_schedule_cfg.items():
+            threshold = int(threshold_raw)
+            batch_value = int(batch_raw)
+            if batch_value <= 0:
+                continue
+            batch_size_schedule.append({"threshold": threshold, "batch_size": batch_value})
+    elif isinstance(raw_batch_size_schedule_cfg, list):
+        for entry in raw_batch_size_schedule_cfg:
+            if not isinstance(entry, dict):
+                continue
+            threshold = int(entry.get("threshold", 0))
+            batch_value = entry.get("batch_size", entry.get("batch", entry.get("value")))
+            if batch_value is None:
+                continue
+            batch_value = int(batch_value)
+            if batch_value <= 0:
+                continue
+            batch_size_schedule.append({"threshold": threshold, "batch_size": batch_value})
+
+    batch_size_auto_from_rollout = False
+    if not batch_size_schedule:
+        if len(timestep_update_schedule) > 1:
+            batch_size_auto_from_rollout = True
+            for entry in timestep_update_schedule:
+                rollout_len = int(entry["timesteps_per_update"])
+                derived_batch = max(32, int(round(rollout_len / 4.0)))
+                batch_size_schedule.append(
+                    {
+                        "threshold": int(entry["threshold"]),
+                        "batch_size": min(rollout_len, derived_batch),
+                    }
+                )
+        else:
+            batch_size_schedule = [{"threshold": 0, "batch_size": batch_size_ppo_base}]
+    else:
+        batch_by_threshold: Dict[int, int] = {}
+        for entry in sorted(batch_size_schedule, key=lambda item: item["threshold"]):
+            batch_by_threshold[int(entry["threshold"])] = int(entry["batch_size"])
+        if 0 not in batch_by_threshold:
+            batch_by_threshold[0] = batch_size_ppo_base
+        batch_size_schedule = [
+            {"threshold": int(threshold), "batch_size": int(value)}
+            for threshold, value in sorted(batch_by_threshold.items(), key=lambda item: item[0])
+        ]
+
+    def determine_batch_size_ppo(current_step: int, current_rollout_len: int) -> int:
+        active_batch = batch_size_schedule[0]["batch_size"]
+        for entry in batch_size_schedule:
+            if current_step >= entry["threshold"]:
+                active_batch = entry["batch_size"]
+            else:
+                break
+        return max(1, min(int(active_batch), int(current_rollout_len)))
 
     def determine_actor_lr(current_step: int) -> float:
         updated_lr = actor_lr_schedule[0]["lr"]
@@ -1813,11 +1925,25 @@ def run_experiment6_tape(
     print(f"   Actor LR (configured): {agent_config['ppo_params']['actor_lr']}")
     print(f"   Actor LR (active): {agent.get_actor_lr():.6f}")
     print(f"   Critic LR (active): {agent.get_critic_lr():.6f}")
+    initial_rollout_len = determine_timesteps_per_update(0)
+    initial_batch_size = determine_batch_size_ppo(0, initial_rollout_len)
     print(
         "   PPO update: "
-        f"epochs={num_ppo_epochs}, batch_size={batch_size_ppo}, "
+        f"epochs={num_ppo_epochs}, batch_size={initial_batch_size}, "
         f"target_kl={agent.target_kl:.4f}, entropy_coef={agent.entropy_coef:.4f}"
     )
+    if len(timestep_update_schedule) > 1:
+        rollout_schedule_pretty = " → ".join(
+            f"{entry['timesteps_per_update']}@{entry['threshold']:,}"
+            for entry in timestep_update_schedule
+        )
+        print(f"   📐 PPO rollout schedule: {rollout_schedule_pretty}")
+    if len(batch_size_schedule) > 1 or batch_size_auto_from_rollout:
+        batch_schedule_pretty = " → ".join(
+            f"{entry['batch_size']}@{entry['threshold']:,}" for entry in batch_size_schedule
+        )
+        source_note = " (auto from rollout/4)" if batch_size_auto_from_rollout else ""
+        print(f"   🧺 PPO batch-size schedule: {batch_schedule_pretty}{source_note}")
 
     log_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = results_root / "logs"
@@ -1844,7 +1970,17 @@ def run_experiment6_tape(
     if step_diagnostics_enabled:
         print(f"🧪 Step diagnostics will stream to {step_diagnostics_path}")
 
-    num_updates = max_total_timesteps // timesteps_per_update
+    def estimate_num_updates(total_steps: int) -> int:
+        simulated_step = 0
+        estimated_updates = 0
+        while simulated_step < total_steps:
+            rollout_len = determine_timesteps_per_update(simulated_step)
+            step_chunk = min(rollout_len, total_steps - simulated_step)
+            simulated_step += step_chunk
+            estimated_updates += 1
+        return estimated_updates
+
+    num_updates = estimate_num_updates(max_total_timesteps)
 
     def to_scalar(value: Any) -> Optional[float]:
         if value is None:
@@ -2022,8 +2158,22 @@ def run_experiment6_tape(
 
     print(f"\n🎯 Starting THREE-COMPONENT TAPE v3 training (with curriculum)...")
     print(f"   Total timesteps: {max_total_timesteps:,}")
-    print(f"   Timesteps per update: {timesteps_per_update}")
+    if len(timestep_update_schedule) == 1:
+        print(f"   Timesteps per update: {timestep_update_schedule[0]['timesteps_per_update']}")
+    else:
+        print(f"   Timesteps per update: scheduled")
+        for entry in timestep_update_schedule:
+            print(
+                f"      {entry['threshold']:,}+ steps: timesteps_per_update={entry['timesteps_per_update']}"
+            )
     print(f"   Number of updates: {num_updates}")
+    if len(batch_size_schedule) == 1 and not batch_size_auto_from_rollout:
+        print(f"   PPO batch_size: {batch_size_schedule[0]['batch_size']}")
+    else:
+        auto_note = " (auto rollout/4)" if batch_size_auto_from_rollout else ""
+        print(f"   PPO batch_size: scheduled{auto_note}")
+        for entry in batch_size_schedule:
+            print(f"      {entry['threshold']:,}+ steps: batch_size={entry['batch_size']}")
     if use_episode_length_curriculum:
         print(f"   📚 Episode Length Curriculum:")
         for entry in curriculum_schedule:
@@ -2149,10 +2299,13 @@ def run_experiment6_tape(
         },
         "Training_Hyperparameters": {
             "max_total_timesteps": max_total_timesteps,
-            "timesteps_per_ppo_update": timesteps_per_update,
+            "timesteps_per_ppo_update": timestep_update_schedule[0]["timesteps_per_update"],
+            "timesteps_per_ppo_update_schedule": timestep_update_schedule,
             "actor_lr_schedule": actor_lr_schedule,
             "num_ppo_epochs": num_ppo_epochs,
-            "batch_size_ppo": batch_size_ppo,
+            "batch_size_ppo": batch_size_schedule[0]["batch_size"],
+            "batch_size_ppo_schedule": batch_size_schedule,
+            "batch_size_ppo_auto_from_rollout_schedule": batch_size_auto_from_rollout,
             "use_episode_length_curriculum": use_episode_length_curriculum,
             "episode_length_curriculum_schedule": curriculum_schedule,
             "episode_length_limit_initial": episode_horizon_start,
@@ -2258,11 +2411,28 @@ def run_experiment6_tape(
     ratio_std_value = 0.0
 
     current_episode_limit = episode_horizon_start if episode_horizon_start is not None else env_train.total_days
+    current_timestep_rollout = determine_timesteps_per_update(0)
+    current_batch_size_ppo = determine_batch_size_ppo(0, current_timestep_rollout)
+    update_count = 0
 
-    for update in range(num_updates):
+    while step < max_total_timesteps:
+        update_count += 1
         episode_terminal_info = None
 
-        for _ in range(timesteps_per_update):
+        active_timestep_rollout = determine_timesteps_per_update(step)
+        active_batch_size_ppo = determine_batch_size_ppo(step, active_timestep_rollout)
+
+        if active_timestep_rollout != current_timestep_rollout:
+            current_timestep_rollout = active_timestep_rollout
+            print(f"\n📚 PPO ROLLOUT UPDATE at {step:,} steps:")
+            print(f"   Timesteps per update: {current_timestep_rollout}")
+        if active_batch_size_ppo != current_batch_size_ppo:
+            current_batch_size_ppo = active_batch_size_ppo
+            print(f"\n📚 PPO BATCH SIZE UPDATE at {step:,} steps:")
+            print(f"   Batch size: {current_batch_size_ppo}")
+
+        steps_this_update = min(active_timestep_rollout, max_total_timesteps - step)
+        for _ in range(steps_this_update):
             action, log_prob, value = agent.get_action_and_value(obs, deterministic=False)
             prev_portfolio_value = float(getattr(env_train, "portfolio_value", np.nan))
             next_obs, reward, done, truncated, info = env_train.step(action)
@@ -2292,7 +2462,7 @@ def run_experiment6_tape(
                 tx_cost_contrib_reward_pts = -(tx_cost_dollars / tx_cost_denom) * 100.0
 
                 step_diag_row = {
-                    "update": update + 1,
+                    "update": update_count,
                     "timestep": step,
                     "episode": training_episode_count,
                     "episode_step": int(info.get("episode_step", getattr(env_train, "episode_step_count", 0)) or 0),
@@ -2488,7 +2658,7 @@ def run_experiment6_tape(
         agent.memory["advantages"] = advantages
         agent.memory["returns"] = returns
 
-        update_metrics = agent.update(num_epochs=num_ppo_epochs, batch_size=batch_size_ppo)
+        update_metrics = agent.update(num_epochs=num_ppo_epochs, batch_size=current_batch_size_ppo)
         agent.clear_memory()
 
         actor_loss_value = update_metrics.get("actor_loss", 0.0)
@@ -2515,13 +2685,13 @@ def run_experiment6_tape(
         ratio_std_value = update_metrics.get("ratio_std", 0.0)
 
         if np.isnan(actor_loss_value) or np.isinf(actor_loss_value):
-            print(f"\n❌ CRITICAL ERROR: NaN/Inf detected in actor_loss at update {update + 1}!")
+            print(f"\n❌ CRITICAL ERROR: NaN/Inf detected in actor_loss at update {update_count}!")
             print(f"   Actor Loss: {actor_loss_value}")
             print(f"   Critic Loss: {critic_loss_value}")
             print(f"   🛑 Stopping training early to prevent cascade failure.")
             break
 
-        if ((update + 1) % update_log_interval == 0) or (update + 1 == num_updates):
+        if (update_count % update_log_interval == 0) or (step >= max_total_timesteps):
             elapsed = time.time() - train_start
 
             snapshot_metrics = (
@@ -2607,7 +2777,7 @@ def run_experiment6_tape(
             terminal_intra_step_tape_delta_reward = last_terminal_intra_step_tape_delta_reward
 
             print(
-                f"🔄 Update {update + 1}/{num_updates} | Step {step:,}/{max_total_timesteps:,} | "
+                f"🔄 Update {update_count}/{num_updates} | Step {step:,}/{max_total_timesteps:,} | "
                 f"Episode {training_episode_count} | Time: {elapsed:.1f}s"
             )
             print(
@@ -2635,20 +2805,21 @@ def run_experiment6_tape(
             )
             print(
                 f"   ⚙️ Optimizer: actor_lr={agent.get_actor_lr():.6f} | "
-                f"critic_lr={agent.get_critic_lr():.6f} | target_kl={agent.target_kl:.4f}"
+                f"critic_lr={agent.get_critic_lr():.6f} | target_kl={agent.target_kl:.4f} | "
+                f"rollout={current_timestep_rollout} | batch_size={current_batch_size_ppo}"
             )
             
             # Alpha diversity logging every 10 updates
-            if (update + 1) % 10 == 0:
+            if update_count % 10 == 0:
                 print(
                     f"   🔬 Alpha Diversity: mean={alpha_mean_val:.2f} | "
                     f"std={alpha_std_val:.2f} | "
                     f"range=[{alpha_min_val:.2f}, {alpha_max_val:.2f}]"
                 )
                 # Warning if alpha stuck (TCN not learning)
-                if update > 500 and alpha_std_val < 0.3:
+                if update_count > 500 and alpha_std_val < 0.3:
                     print(
-                        f"   ⚠️  WARNING: Alpha std < 0.3 after {update+1} updates. "
+                        f"   ⚠️  WARNING: Alpha std < 0.3 after {update_count} updates. "
                         f"TCN may not be learning asset discrimination."
                     )
 
@@ -2679,7 +2850,7 @@ def run_experiment6_tape(
                 )
 
             training_row = {
-                "update": update + 1,
+                "update": update_count,
                 "timestep": step,
                 "episode": training_episode_count,
                 "elapsed_time": elapsed,
