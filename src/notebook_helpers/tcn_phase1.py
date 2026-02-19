@@ -595,6 +595,11 @@ TRAINING_FIELDNAMES: List[str] = [
     "next_profile_reason",
     "actor_loss",
     "critic_loss",
+    "critic_loss_scaled",
+    "risk_aux_total",
+    "risk_aux_sharpe_proxy",
+    "risk_aux_sharpe_loss",
+    "risk_aux_mvo_loss",
     "mean_advantage",
     "policy_entropy",
     "policy_loss",
@@ -2415,6 +2420,11 @@ def run_experiment6_tape(
 
         actor_loss_value = update_metrics.get("actor_loss", 0.0)
         critic_loss_value = update_metrics.get("critic_loss", 0.0)
+        critic_loss_scaled_value = update_metrics.get("critic_loss_scaled", critic_loss_value)
+        risk_aux_total_value = update_metrics.get("risk_aux_total", 0.0)
+        risk_aux_sharpe_proxy_value = update_metrics.get("risk_aux_sharpe_proxy", 0.0)
+        risk_aux_sharpe_loss_value = update_metrics.get("risk_aux_sharpe_loss", 0.0)
+        risk_aux_mvo_loss_value = update_metrics.get("risk_aux_mvo_loss", 0.0)
         policy_entropy_value = update_metrics.get("entropy", 0.0)
         policy_loss_value = update_metrics.get("policy_loss", 0.0)
         entropy_loss_value = update_metrics.get("entropy_loss", 0.0)
@@ -2475,6 +2485,11 @@ def run_experiment6_tape(
 
             actor_loss_val = to_scalar(actor_loss_value)
             critic_loss_val = to_scalar(critic_loss_value)
+            critic_loss_scaled_val = to_scalar(critic_loss_scaled_value)
+            risk_aux_total_val = to_scalar(risk_aux_total_value)
+            risk_aux_sharpe_proxy_val = to_scalar(risk_aux_sharpe_proxy_value)
+            risk_aux_sharpe_loss_val = to_scalar(risk_aux_sharpe_loss_value)
+            risk_aux_mvo_loss_val = to_scalar(risk_aux_mvo_loss_value)
             mean_advantage_val = to_scalar(update_metrics.get("mean_advantage", 0.0))
             policy_entropy_val = to_scalar(policy_entropy_value)
             policy_loss_val = to_scalar(policy_loss_value)
@@ -2537,6 +2552,13 @@ def run_experiment6_tape(
             print(
                 f"   🧠 Training: actor_loss={actor_loss_val:.4f} | "
                 f"critic_loss={critic_loss_val:.4f} | mean_adv={mean_advantage_val:.4f}"
+            )
+            print(
+                f"   🧮 Loss Detail: critic_scaled={critic_loss_scaled_val:.4f} | "
+                f"risk_aux_total={risk_aux_total_val:.4f} | "
+                f"sharpe_proxy={risk_aux_sharpe_proxy_val:.4f} | "
+                f"sharpe_loss={risk_aux_sharpe_loss_val:.4f} | "
+                f"mvo_loss={risk_aux_mvo_loss_val:.4f}"
             )
             print(
                 f"   ⚙️ Optimizer: actor_lr={agent.get_actor_lr():.6f} | "
@@ -2603,6 +2625,11 @@ def run_experiment6_tape(
                 "episode_cvar_5pct": episode_cvar_val,
                 "actor_loss": actor_loss_val,
                 "critic_loss": critic_loss_val,
+                "critic_loss_scaled": critic_loss_scaled_val,
+                "risk_aux_total": risk_aux_total_val,
+                "risk_aux_sharpe_proxy": risk_aux_sharpe_proxy_val,
+                "risk_aux_sharpe_loss": risk_aux_sharpe_loss_val,
+                "risk_aux_mvo_loss": risk_aux_mvo_loss_val,
                 "mean_advantage": mean_advantage_val,
                 "profile_name": last_profile_name,
                 "turnover_scalar": current_turnover_scalar,

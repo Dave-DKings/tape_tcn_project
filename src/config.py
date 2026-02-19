@@ -459,7 +459,17 @@ PHASE1_CONFIG = {
             "entropy_coef": 0.01, "vf_coef": 0.5, "num_ppo_epochs": 4,
             "batch_size_ppo": 252, "actor_lr": 0.00002, "critic_lr": 0.0003,
             "max_grad_norm": 0.5, "value_clip": 0.2, "target_kl": 0.015,
-            "kl_stop_multiplier": 1.2, "minibatches_before_kl_stop": 1
+            "kl_stop_multiplier": 1.2, "minibatches_before_kl_stop": 1,
+            # Optional risk-aware actor auxiliaries (default disabled).
+            "use_risk_aux_loss": False,
+            # Per-asset feature index used as one-step return proxy in structured state tensor.
+            "risk_aux_return_feature_index": 0,
+            "risk_aux_cash_return": 0.0,
+            "risk_aux_sharpe_coef": 0.0,
+            "risk_aux_mvo_coef": 0.0,
+            "risk_aux_mvo_cov_ridge": 1e-3,
+            "risk_aux_mvo_long_only": True,
+            "risk_aux_mvo_risky_budget": 0.95,
         },
     },
     #================================================
@@ -719,7 +729,16 @@ PHASE2_CONFIG = {
             "entropy_coef": 0.01, "vf_coef": 0.5, "num_ppo_epochs": 4,
             "batch_size_ppo": 256, "actor_lr": 0.00002, "critic_lr": 0.0003,
             "max_grad_norm": 0.5, "value_clip": 0.2, "target_kl": 0.015,
-            "kl_stop_multiplier": 1.2, "minibatches_before_kl_stop": 1
+            "kl_stop_multiplier": 1.2, "minibatches_before_kl_stop": 1,
+            # Optional risk-aware actor auxiliaries (default disabled).
+            "use_risk_aux_loss": False,
+            "risk_aux_return_feature_index": 0,
+            "risk_aux_cash_return": 0.0,
+            "risk_aux_sharpe_coef": 0.0,
+            "risk_aux_mvo_coef": 0.0,
+            "risk_aux_mvo_cov_ridge": 1e-3,
+            "risk_aux_mvo_long_only": True,
+            "risk_aux_mvo_risky_budget": 0.95,
         },
     },
     #================================================

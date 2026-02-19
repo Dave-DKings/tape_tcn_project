@@ -160,6 +160,19 @@ class PPOAgentTF:
         self.target_kl = float(ppo_params.get('target_kl', 0.03))
         self.kl_stop_multiplier = float(ppo_params.get('kl_stop_multiplier', 1.5))
         self.minibatches_before_kl_stop = int(ppo_params.get('minibatches_before_kl_stop', 2))
+
+        # Optional risk-aware actor auxiliary losses (disabled by default).
+        # These are additive regularizers intended to improve risk-adjusted robustness.
+        self.use_risk_aux_loss = bool(ppo_params.get('use_risk_aux_loss', False))
+        self.risk_aux_return_feature_index = int(ppo_params.get('risk_aux_return_feature_index', 0))
+        self.risk_aux_cash_return = float(ppo_params.get('risk_aux_cash_return', 0.0))
+        self.risk_aux_sharpe_coef = float(ppo_params.get('risk_aux_sharpe_coef', 0.0))
+        self.risk_aux_mvo_coef = float(ppo_params.get('risk_aux_mvo_coef', 0.0))
+        self.risk_aux_mvo_cov_ridge = float(ppo_params.get('risk_aux_mvo_cov_ridge', 1e-3))
+        self.risk_aux_mvo_long_only = bool(ppo_params.get('risk_aux_mvo_long_only', True))
+        self.risk_aux_mvo_risky_budget = float(
+            np.clip(ppo_params.get('risk_aux_mvo_risky_budget', 0.95), 0.0, 1.0)
+        )
         
         # Create networks using architecture factory
         logger.info(f"Creating {self.architecture} actor-critic networks...")
@@ -200,6 +213,13 @@ class PPOAgentTF:
         logger.info(
             f"  PPO params: γ={self.gamma}, λ={self.gae_lambda}, clip={self.policy_clip}, "
             f"value_clip={self.value_clip_range}, target_kl={self.target_kl:.4f}"
+        )
+        logger.info(
+            "  Risk aux: enabled=%s, sharpe_coef=%.4f, mvo_coef=%.4f, return_feature_idx=%d",
+            self.use_risk_aux_loss,
+            self.risk_aux_sharpe_coef,
+            self.risk_aux_mvo_coef,
+            self.risk_aux_return_feature_index,
         )
         logger.info(
             f"  Learning rates (init): actor={self.get_actor_lr():.6f}, critic={self.get_critic_lr():.6f}"
@@ -739,6 +759,111 @@ class PPOAgentTF:
         
         return advantages, returns
     
+    def _extract_asset_return_proxy(self, states):
+        """
+        Extract a per-asset return proxy from structured states.
+
+        Uses the latest timestep and configured feature index from the per-asset tensor:
+          states['asset'] shape: (batch, timesteps, num_assets, asset_feature_dim)
+        """
+        if not isinstance(states, dict):
+            return None
+
+        asset = states.get("asset")
+        if asset is None:
+            return None
+
+        asset = tf.convert_to_tensor(asset, dtype=tf.float32)
+        if asset.shape.rank != 4:
+            return None
+        if asset.shape[-1] == 0:
+            return None
+
+        latest = asset[:, -1, :, :]  # (batch, num_assets, feature_dim)
+        feature_dim = tf.shape(latest)[-1]
+        safe_idx = tf.clip_by_value(
+            tf.constant(self.risk_aux_return_feature_index, dtype=tf.int32),
+            0,
+            tf.maximum(feature_dim - 1, 0),
+        )
+        return tf.gather(latest, safe_idx, axis=-1)  # (batch, num_assets)
+
+    def _compute_mvo_target_weights(self, asset_returns: tf.Tensor):
+        """
+        Compute a simple long-only MVO target from batch return proxies.
+
+        Returns:
+            target_risky_weights: (num_assets,)
+            target_cash_weight: scalar
+        """
+        asset_returns = tf.convert_to_tensor(asset_returns, dtype=tf.float32)
+        n_obs = tf.cast(tf.shape(asset_returns)[0], tf.float32)
+        n_assets = tf.shape(asset_returns)[1]
+
+        mu = tf.reduce_mean(asset_returns, axis=0)  # (num_assets,)
+        centered = asset_returns - mu
+        denom = tf.maximum(n_obs - 1.0, 1.0)
+        cov = tf.matmul(centered, centered, transpose_a=True) / denom
+
+        ridge = tf.cast(self.risk_aux_mvo_cov_ridge, tf.float32)
+        cov_reg = cov + ridge * tf.eye(n_assets, dtype=tf.float32)
+        inv_cov = tf.linalg.pinv(cov_reg)
+
+        raw = tf.linalg.matvec(inv_cov, mu)
+        if self.risk_aux_mvo_long_only:
+            raw = tf.nn.relu(raw)
+
+        eps = tf.constant(1e-8, dtype=tf.float32)
+        raw_sum = tf.reduce_sum(raw)
+        equal = tf.ones_like(raw) / tf.cast(n_assets, tf.float32)
+        normalized = tf.where(raw_sum > eps, raw / (raw_sum + eps), equal)
+
+        risky_budget = tf.constant(self.risk_aux_mvo_risky_budget, dtype=tf.float32)
+        target_risky = normalized * risky_budget
+        target_cash = 1.0 - risky_budget
+        return target_risky, target_cash
+
+    def _compute_risk_aux_loss(self, states, alpha):
+        """
+        Compute optional risk-aware actor auxiliaries.
+
+        Components:
+          - Sharpe surrogate: maximize batch Sharpe of actor-implied one-step proxy returns.
+          - MVO regularizer: pull actor risky weights toward a long-only MVO target.
+        """
+        zero = tf.constant(0.0, dtype=tf.float32)
+        if not self.use_risk_aux_loss:
+            return zero, zero, zero, zero
+
+        asset_returns = self._extract_asset_return_proxy(states)
+        if asset_returns is None:
+            return zero, zero, zero, zero
+
+        alpha = tf.convert_to_tensor(alpha, dtype=tf.float32)
+        weights = alpha / tf.maximum(tf.reduce_sum(alpha, axis=-1, keepdims=True), 1e-8)
+        risky_weights = weights[:, :self.num_assets]
+        cash_weights = weights[:, self.num_assets]
+
+        sharpe_proxy = tf.constant(0.0, dtype=tf.float32)
+        sharpe_loss = tf.constant(0.0, dtype=tf.float32)
+        if self.risk_aux_sharpe_coef > 0.0:
+            cash_ret = tf.constant(self.risk_aux_cash_return, dtype=tf.float32)
+            portfolio_proxy_returns = tf.reduce_sum(risky_weights * asset_returns, axis=-1) + cash_weights * cash_ret
+            mu_p = tf.reduce_mean(portfolio_proxy_returns)
+            sigma_p = tf.math.reduce_std(portfolio_proxy_returns)
+            sharpe_proxy = mu_p / (sigma_p + 1e-6)
+            sharpe_loss = -tf.constant(self.risk_aux_sharpe_coef, dtype=tf.float32) * sharpe_proxy
+
+        mvo_loss = tf.constant(0.0, dtype=tf.float32)
+        if self.risk_aux_mvo_coef > 0.0:
+            target_risky, target_cash = self._compute_mvo_target_weights(asset_returns)
+            risky_mse = tf.reduce_mean(tf.square(risky_weights - target_risky[tf.newaxis, :]))
+            cash_mse = tf.reduce_mean(tf.square(cash_weights - target_cash))
+            mvo_loss = tf.constant(self.risk_aux_mvo_coef, dtype=tf.float32) * (risky_mse + cash_mse)
+
+        total_aux = sharpe_loss + mvo_loss
+        return total_aux, sharpe_proxy, sharpe_loss, mvo_loss
+
     # @tf.function  # DISABLED: Causes weight caching issues with PPO ratio stuck at 1.0
     def _actor_loss(self, states, actions, log_probs_old, advantages):
         """
@@ -751,7 +876,7 @@ class PPOAgentTF:
             advantages: Advantage estimates
             
         Returns:
-            tuple: (total_loss, policy_loss, entropy_loss, entropy, ratio_mean, ratio_std)
+            tuple with PPO losses/diagnostics + optional risk-aware auxiliaries
         """
         # Get current policy distribution
         alpha = self.actor(states, training=True)
@@ -788,7 +913,8 @@ class PPOAgentTF:
         entropy = tf.reduce_mean(dirichlet.entropy())
         entropy_loss = -self.entropy_coef * entropy
         
-        total_loss = policy_loss + entropy_loss
+        risk_aux_total, sharpe_aux_proxy, sharpe_aux_loss, mvo_aux_loss = self._compute_risk_aux_loss(states, alpha)
+        total_loss = policy_loss + entropy_loss + risk_aux_total
         
         approx_kl = tf.reduce_mean(log_probs_old - log_probs_new)
         clip_mask = tf.cast(tf.abs(ratio_unclipped - 1.0) > self.policy_clip, tf.float32)
@@ -802,7 +928,11 @@ class PPOAgentTF:
             ratio_mean,
             ratio_std,
             approx_kl,
-            clip_fraction
+            clip_fraction,
+            risk_aux_total,
+            sharpe_aux_proxy,
+            sharpe_aux_loss,
+            mvo_aux_loss,
         )
     
     @tf.function(reduce_retracing=True)
@@ -962,6 +1092,11 @@ class PPOAgentTF:
         stats = {
             'actor_loss': 0.0,
             'critic_loss': 0.0,
+            'critic_loss_scaled': 0.0,
+            'risk_aux_total': 0.0,
+            'risk_aux_sharpe_proxy': 0.0,
+            'risk_aux_sharpe_loss': 0.0,
+            'risk_aux_mvo_loss': 0.0,
             'policy_loss': 0.0,
             'entropy_loss': 0.0,
             'entropy': 0.0,
@@ -1037,7 +1172,11 @@ class PPOAgentTF:
                         ratio_mean,
                         ratio_std,
                         approx_kl,
-                        clip_fraction
+                        clip_fraction,
+                        risk_aux_total,
+                        sharpe_aux_proxy,
+                        sharpe_aux_loss,
+                        mvo_aux_loss,
                     ) = self._actor_loss(
                         batch_states, batch_actions, batch_log_probs_old, batch_advantages
                     )
@@ -1053,13 +1192,16 @@ class PPOAgentTF:
                 
                 # Update critic
                 with tf.GradientTape() as tape:
-                    critic_loss, value_clip_fraction = self._critic_loss(
+                    critic_loss_raw, value_clip_fraction = self._critic_loss(
                         batch_states,
                         batch_returns,
                         returns_mean_tf,
                         returns_std_tf,
                         batch_old_values
                     )
+                    # Apply configurable value-function coefficient to critic optimization.
+                    # This was previously ignored because actor/critic are updated separately.
+                    critic_loss = critic_loss_raw * self.vf_coef
                 
                 critic_grads = tape.gradient(critic_loss, self.critic.trainable_variables)
                 
@@ -1075,7 +1217,12 @@ class PPOAgentTF:
                 
                 # Accumulate statistics
                 stats['actor_loss'] += float(actor_loss)
-                stats['critic_loss'] += float(critic_loss)
+                stats['critic_loss'] += float(critic_loss_raw)
+                stats['critic_loss_scaled'] += float(critic_loss)
+                stats['risk_aux_total'] += float(risk_aux_total)
+                stats['risk_aux_sharpe_proxy'] += float(sharpe_aux_proxy)
+                stats['risk_aux_sharpe_loss'] += float(sharpe_aux_loss)
+                stats['risk_aux_mvo_loss'] += float(mvo_aux_loss)
                 stats['policy_loss'] += float(policy_loss)
                 stats['entropy_loss'] += float(entropy_loss)
                 stats['entropy'] += float(entropy)
@@ -1098,7 +1245,7 @@ class PPOAgentTF:
                     # Return current stats to allow graceful handling
                     break
                 
-                if tf.math.is_nan(critic_loss) or tf.math.is_inf(critic_loss):
+                if tf.math.is_nan(critic_loss_raw) or tf.math.is_inf(critic_loss_raw):
                     logger.error(f"❌ CRITICAL: NaN/Inf detected in critic_loss! Training unstable.")
                     break
 
@@ -1125,7 +1272,9 @@ class PPOAgentTF:
         # Average statistics over all updates
         num_updates = stats['num_grad_updates']
         if num_updates > 0:
-            for key in ['actor_loss', 'critic_loss', 'policy_loss', 'entropy_loss', 'entropy',
+            for key in ['actor_loss', 'critic_loss', 'critic_loss_scaled',
+                       'risk_aux_total', 'risk_aux_sharpe_proxy', 'risk_aux_sharpe_loss', 'risk_aux_mvo_loss',
+                       'policy_loss', 'entropy_loss', 'entropy',
                        'actor_grad_norm', 'critic_grad_norm', 'alpha_min', 'alpha_max', 'alpha_mean', 'alpha_std',
                        'ratio_mean', 'ratio_std', 'approx_kl', 'clip_fraction', 'value_clip_fraction']:
                 stats[key] /= num_updates
