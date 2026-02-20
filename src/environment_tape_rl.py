@@ -118,6 +118,7 @@ class PortfolioEnvTAPE(gym.Env):
                  target_turnover: float = 0.76,  # Target turnover per day as decimal (0.76 = 76%)
                  turnover_penalty_scalar: float = 5.0,
                  turnover_target_band: float = 0.20,
+                 action_execution_beta: float = 1.0,
                  gamma: float = 0.99,
                  enable_base_reward: bool = True,
                  drawdown_constraint: Optional[Dict[str, Any]] = None):
@@ -189,6 +190,10 @@ class PortfolioEnvTAPE(gym.Env):
                 - Only applied when turnover exceeds ceiling
                 - Only used when reward_system='tape'
             turnover_target_band: DEPRECATED - no longer used (was for symmetric proximity)
+            action_execution_beta: Execution inertia coefficient in [0, 1] (default: 1.0)
+                - 1.0 = no smoothing (execute proposed weights directly)
+                - <1.0 = smooth execution using w_exec = (1-beta)*w_prev + beta*w_raw
+                - Lower values reduce step-to-step allocation jumps and turnover
             episode_length_limit: Optional hard cap on episode length (default: None)
                 - When provided, episode terminates after `limit` steps even if data remains.
             gamma: Discount factor for PBRS (Potential-Based Reward Shaping) (default: 0.99)
@@ -336,6 +341,8 @@ class PortfolioEnvTAPE(gym.Env):
                 config.get('transaction_cost_pct', config.get('TRANSACTION_COST_RATE', 0.0001))
             )
         )
+        action_execution_beta_cfg = env_params.get('action_execution_beta', action_execution_beta)
+        self.action_execution_beta = float(np.clip(action_execution_beta_cfg, 0.0, 1.0))
 
         # Action-realization alignment and concentration controls
         self.concentration_penalty_scalar = float(env_params.get('concentration_penalty_scalar', 0.0))
@@ -491,6 +498,7 @@ class PortfolioEnvTAPE(gym.Env):
         logger.info(f"  Features: {self.num_features}")
         logger.info(f"  Initial Balance: ${self.initial_balance:,.2f}")
         logger.info(f"  Reward System: {self.reward_system.upper()}")
+        logger.info(f"  Action Execution Beta: {self.action_execution_beta:.3f}")
         if self.episode_length_limit is not None:
             logger.info(f"  Episode Step Limit: {self.episode_length_limit}")
 
@@ -957,6 +965,10 @@ class PortfolioEnvTAPE(gym.Env):
     def set_episode_length_limit(self, limit: Optional[int]) -> None:
         """Set or clear the maximum number of steps per episode."""
         self.episode_length_limit = int(limit) if limit is not None else None
+
+    def set_action_execution_beta(self, beta: float) -> None:
+        """Set execution inertia coefficient used for action smoothing."""
+        self.action_execution_beta = float(np.clip(beta, 0.0, 1.0))
 
     def _compute_intra_step_tape_potential(self) -> Optional[float]:
         """
@@ -1490,6 +1502,18 @@ class PortfolioEnvTAPE(gym.Env):
         
         last_portfolio_value = self.portfolio_value
         last_weights = self.current_weights.copy()
+
+        # Apply execution inertia to reduce policy jitter and excessive turnover.
+        target_weights = weights.copy()
+        beta = float(np.clip(self.action_execution_beta, 0.0, 1.0))
+        if beta < 1.0:
+            weights = ((1.0 - beta) * last_weights + beta * target_weights).astype(np.float32)
+            weight_sum = float(np.sum(weights))
+            if weight_sum > 0 and np.isfinite(weight_sum):
+                weights = weights / weight_sum
+            else:
+                weights = last_weights.copy()
+        execution_smoothing_l1 = float(np.sum(np.abs(weights - target_weights)))
         
         # ═══════════════════════════════════════════════════════════════
         # STEP 4: ADVANCE TO NEXT DAY
@@ -1546,8 +1570,9 @@ class PortfolioEnvTAPE(gym.Env):
         # NOTE: TAPE doesn't explicitly model transaction costs in the
         # portfolio environment, but we keep this for realism
         
-        # Calculate turnover: sum of absolute weight changes
-        turnover = np.sum(np.abs(weights - last_weights))
+        # Calculate raw/executed turnover diagnostics.
+        raw_turnover = float(np.sum(np.abs(target_weights - last_weights)))
+        turnover = float(np.sum(np.abs(weights - last_weights)))
         
         # Transaction costs = rate * portfolio_value * turnover
         transaction_costs = self.transaction_cost_rate * new_portfolio_value * turnover
@@ -1676,6 +1701,10 @@ class PortfolioEnvTAPE(gym.Env):
             'weights': self.current_weights.copy(),
             'portfolio_return': portfolio_return,
             'turnover': turnover,
+            'raw_turnover': raw_turnover,
+            'executed_turnover': turnover,
+            'action_execution_beta': beta,
+            'execution_smoothing_l1': execution_smoothing_l1,
             'transaction_costs': transaction_costs,
             'day': self.day,
             'date': self.dates[self.day] if self.day < len(self.dates) else None,

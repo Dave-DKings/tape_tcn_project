@@ -669,6 +669,10 @@ STEP_DIAGNOSTIC_FIELDNAMES: List[str] = [
     "prev_portfolio_value",
     "l1_w_delta",
     "turnover",
+    "raw_turnover",
+    "executed_turnover",
+    "action_execution_beta",
+    "execution_smoothing_l1",
     "turnover_target",
     "turnover_scalar",
     "turnover_penalty_contrib",
@@ -1016,6 +1020,8 @@ def load_training_metadata_into_config(
         "timesteps_per_ppo_update_schedule",
         "batch_size_ppo",
         "batch_size_ppo_schedule",
+        "action_execution_beta_curriculum",
+        "evaluation_action_execution_beta",
         "evaluation_turnover_penalty_scalar",
     ):
         if key in train_meta:
@@ -1040,6 +1046,7 @@ def load_training_metadata_into_config(
         "tape_terminal_gate_a_enabled",
         "tape_terminal_gate_a_sharpe_threshold",
         "tape_terminal_gate_a_max_drawdown",
+        "action_execution_beta",
         "reward_credit_assignment_mode",
         "retroactive_episode_reward_scaling",
         "training_entrypoint",
@@ -1604,6 +1611,49 @@ def run_experiment6_tape(
     dsr_scalar_cfg = float(env_params.get("dsr_scalar", 7.0))
     target_turnover_cfg = float(env_params.get("target_turnover", 0.60))
     turnover_band_cfg = float(env_params.get("turnover_target_band", 0.20))
+    train_action_execution_beta_default = float(
+        np.clip(env_params.get("action_execution_beta", 1.0), 0.0, 1.0)
+    )
+    raw_action_execution_beta_curriculum = training_params.get(
+        "action_execution_beta_curriculum",
+        {0: train_action_execution_beta_default},
+    )
+    action_execution_beta_curriculum: Dict[int, float] = {}
+    if isinstance(raw_action_execution_beta_curriculum, dict):
+        for threshold_raw, beta_raw in raw_action_execution_beta_curriculum.items():
+            action_execution_beta_curriculum[int(threshold_raw)] = float(
+                np.clip(beta_raw, 0.0, 1.0)
+            )
+    elif isinstance(raw_action_execution_beta_curriculum, list):
+        for entry in raw_action_execution_beta_curriculum:
+            if not isinstance(entry, dict):
+                continue
+            threshold = int(entry.get("threshold", 0))
+            beta_value = entry.get("beta", entry.get("value"))
+            if beta_value is None:
+                continue
+            action_execution_beta_curriculum[threshold] = float(np.clip(beta_value, 0.0, 1.0))
+    if not action_execution_beta_curriculum:
+        action_execution_beta_curriculum = {0: train_action_execution_beta_default}
+    if 0 not in action_execution_beta_curriculum:
+        action_execution_beta_curriculum[0] = train_action_execution_beta_default
+    sorted_action_execution_betas = [
+        beta for _, beta in sorted(action_execution_beta_curriculum.items(), key=lambda item: item[0])
+    ]
+    if len(sorted_action_execution_betas) > 1:
+        action_execution_beta_display = (
+            f"{sorted_action_execution_betas[0]:.2f} -> "
+            + " → ".join(f"{v:.2f}" for v in sorted_action_execution_betas[1:])
+        )
+    else:
+        action_execution_beta_display = f"{sorted_action_execution_betas[0]:.2f}"
+    eval_action_execution_beta = float(
+        np.clip(
+            training_params.get("evaluation_action_execution_beta", train_action_execution_beta_default),
+            0.0,
+            1.0,
+        )
+    )
     gamma_cfg = float(config.get("agent_params", {}).get("ppo_params", {}).get("gamma", 0.99))
     train_turnover_default = float(env_params.get("turnover_penalty_scalar", 2.0))
     eval_turnover_scalar = float(training_params.get("evaluation_turnover_penalty_scalar", train_turnover_default))
@@ -1613,6 +1663,12 @@ def run_experiment6_tape(
             if current_timestep >= threshold:
                 return scalar
         return train_turnover_default
+
+    def get_current_action_execution_beta(current_timestep: int) -> float:
+        for threshold, beta_value in sorted(action_execution_beta_curriculum.items(), reverse=True):
+            if current_timestep >= threshold:
+                return float(np.clip(beta_value, 0.0, 1.0))
+        return train_action_execution_beta_default
 
     update_log_interval = int(training_params.get("update_log_interval", 1))
     print(f"\n🏗️ Creating THREE-COMPONENT TAPE v3 environments (with curriculum)...")
@@ -1629,6 +1685,15 @@ def run_experiment6_tape(
         f"(target={target_turnover_cfg:.2f}, band=±{turnover_band_cfg:.2f}, scalar={turnover_scalar_display})"
     )
     print(f"      ↳ Schedule: {turnover_schedule_pretty}")
+    action_execution_schedule_pretty = " → ".join(
+        f"{beta:.2f}@{threshold:,}"
+        for threshold, beta in sorted(action_execution_beta_curriculum.items(), key=lambda item: item[0])
+    )
+    print(
+        f"   ⚙️  Component 4: Execution Inertia "
+        f"(beta={action_execution_beta_display}, w_exec=(1-β)w_prev + βw_raw)"
+    )
+    print(f"      ↳ Schedule: {action_execution_schedule_pretty}")
     print(
         "   🎁 Terminal: "
         f"mode={tape_terminal_bonus_mode}, baseline={tape_terminal_baseline:.2f}, "
@@ -1716,6 +1781,7 @@ def run_experiment6_tape(
         dsr_scalar=dsr_scalar_cfg,
         target_turnover=target_turnover_cfg,
         turnover_target_band=turnover_band_cfg,
+        action_execution_beta=get_current_action_execution_beta(0),
         enable_base_reward=True,
         turnover_penalty_scalar=train_turnover_default,
         gamma=gamma_cfg,
@@ -1759,6 +1825,7 @@ def run_experiment6_tape(
         dsr_scalar=dsr_scalar_cfg,
         target_turnover=target_turnover_cfg,
         turnover_target_band=turnover_band_cfg,
+        action_execution_beta=eval_action_execution_beta,
         enable_base_reward=True,
         turnover_penalty_scalar=eval_turnover_scalar,
         gamma=gamma_cfg,
@@ -1789,6 +1856,7 @@ def run_experiment6_tape(
         dsr_scalar=dsr_scalar_cfg,
         target_turnover=target_turnover_cfg,
         turnover_target_band=turnover_band_cfg,
+        action_execution_beta=eval_action_execution_beta,
         enable_base_reward=True,
         turnover_penalty_scalar=eval_turnover_scalar,
         gamma=gamma_cfg,
@@ -2185,6 +2253,9 @@ def run_experiment6_tape(
     print(f"   📚 Turnover Scalar Curriculum:")
     for threshold, scalar in sorted(turnover_curriculum.items(), key=lambda item: item[0]):
         print(f"      {threshold:,}+ steps: scalar={scalar:.2f}")
+    print(f"   🎛️ Action Execution Beta Curriculum:")
+    for threshold, beta_value in sorted(action_execution_beta_curriculum.items(), key=lambda item: item[0]):
+        print(f"      {threshold:,}+ steps: beta={beta_value:.2f}")
     if high_watermark_checkpoint_enabled_cfg:
         print(
             "   🏆 High-Watermark checkpoints: "
@@ -2310,6 +2381,8 @@ def run_experiment6_tape(
             "episode_length_curriculum_schedule": curriculum_schedule,
             "episode_length_limit_initial": episode_horizon_start,
             "turnover_penalty_curriculum": turnover_curriculum,
+            "action_execution_beta_curriculum": action_execution_beta_curriculum,
+            "evaluation_action_execution_beta": eval_action_execution_beta,
             "evaluation_turnover_penalty_scalar": eval_turnover_scalar,
             "log_step_diagnostics": bool(step_diagnostics_enabled),
             "gamma": gamma_cfg,
@@ -2318,6 +2391,7 @@ def run_experiment6_tape(
             "dsr_scalar": dsr_scalar_cfg,
             "target_turnover": target_turnover_cfg,
             "turnover_target_band": turnover_band_cfg,
+            "action_execution_beta": train_action_execution_beta_default,
             "tape_terminal_scalar": tape_terminal_scalar,
             "tape_terminal_clip": tape_terminal_clip,
             "tape_terminal_bonus_mode": tape_terminal_bonus_mode,
@@ -2358,6 +2432,7 @@ def run_experiment6_tape(
 
     last_tape_bonus_clipped = False
     current_turnover_scalar = get_current_turnover_scalar(0)
+    current_action_execution_beta = get_current_action_execution_beta(0)
 
     episode_terminal_info = None
     metrics_for_update = None
@@ -2474,6 +2549,12 @@ def run_experiment6_tape(
                     "prev_portfolio_value": float(prev_portfolio_value),
                     "l1_w_delta": turnover_val,
                     "turnover": turnover_val,
+                    "raw_turnover": float(info.get("raw_turnover", turnover_val) or turnover_val),
+                    "executed_turnover": float(info.get("executed_turnover", turnover_val) or turnover_val),
+                    "action_execution_beta": float(
+                        info.get("action_execution_beta", getattr(env_train, "action_execution_beta", np.nan))
+                    ),
+                    "execution_smoothing_l1": float(info.get("execution_smoothing_l1", 0.0) or 0.0),
                     "turnover_target": turnover_target,
                     "turnover_scalar": turnover_scalar_live,
                     "turnover_penalty_contrib": float(turnover_penalty_contrib),
@@ -2636,6 +2717,17 @@ def run_experiment6_tape(
             env_train.turnover_penalty_scalar = current_turnover_scalar
             print(f"\n📚 TURNOVER CURRICULUM UPDATE at {step:,} steps:")
             print(f"   Turnover penalty scalar: {current_turnover_scalar}")
+
+        new_action_execution_beta = get_current_action_execution_beta(step)
+        if not np.isclose(new_action_execution_beta, current_action_execution_beta):
+            current_action_execution_beta = new_action_execution_beta
+            env_train.set_action_execution_beta(current_action_execution_beta)
+            print(f"\n🎛️ EXECUTION BETA UPDATE at {step:,} steps:")
+            print(
+                "   action_execution_beta: "
+                f"{current_action_execution_beta:.3f} "
+                "(w_exec=(1-β)w_prev + βw_raw)"
+            )
 
         if use_episode_length_curriculum:
             new_episode_limit = determine_episode_limit(step, env_train.total_days)
