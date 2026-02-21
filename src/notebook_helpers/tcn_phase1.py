@@ -219,6 +219,7 @@ def _infer_tcn_filters_from_checkpoint(checkpoint_prefix: str) -> Optional[List[
             if layers_group is None:
                 return None
 
+            # Legacy/simple TCN naming pattern (tcn_block, tcn_block_1, ...).
             block_idx = 0
             while True:
                 block_name = "tcn_block" if block_idx == 0 else f"tcn_block_{block_idx}"
@@ -236,6 +237,28 @@ def _infer_tcn_filters_from_checkpoint(checkpoint_prefix: str) -> Optional[List[
                     break
                 filters.append(int(kernel_ds.shape[-1]))
                 block_idx += 1
+
+            # Fusion/attention naming pattern:
+            #   tcn_fusion_actor_asset_tcn_{i}_conv1
+            #   tcn_actor_tcn_{i}_conv1
+            if not filters:
+                indexed_filters: Dict[int, int] = {}
+                for layer_name in layers_group.keys():
+                    match = re.search(r"_tcn_(\d+)_conv1$", str(layer_name))
+                    if not match:
+                        continue
+                    conv_group = layers_group.get(layer_name)
+                    if conv_group is None:
+                        continue
+                    vars_group = conv_group.get("vars")
+                    if vars_group is None or "0" not in vars_group:
+                        continue
+                    kernel_ds = vars_group["0"]
+                    if len(kernel_ds.shape) < 3:
+                        continue
+                    indexed_filters[int(match.group(1))] = int(kernel_ds.shape[-1])
+                if indexed_filters:
+                    filters = [indexed_filters[idx] for idx in sorted(indexed_filters.keys())]
     except OSError:
         return None
 
@@ -812,7 +835,7 @@ def create_experiment6_result_stub(
     
     architecture_upper = architecture.upper()
     resolved_exp_name = exp_name or f"{architecture_upper} Enhanced + TAPE Three-Component"
-    resolved_agent_config = copy.deepcopy(agent_config) if agent_config is not None else {
+    default_agent_config: Dict[str, Any] = {
         "actor_critic_type": architecture_upper,
         "actor_hidden_dims": [256, 128],
         "critic_hidden_dims": [256, 128],
@@ -840,16 +863,28 @@ def create_experiment6_result_stub(
         "dirichlet_exp_clip": (-5.0, 3.0),
         "max_total_timesteps": max_total_timesteps,
     }
-    if base_agent_params:
-        for key, value in base_agent_params.items():
-            if key == "ppo_params":
-                resolved_agent_config.setdefault("ppo_params", {})
-                for param_key, param_value in value.items():
-                    if param_key not in resolved_agent_config["ppo_params"]:
-                        resolved_agent_config["ppo_params"][param_key] = copy.deepcopy(param_value)
-            else:
-                if key not in resolved_agent_config:
-                    resolved_agent_config[key] = copy.deepcopy(value)
+
+    # Prefer explicit runtime agent_config, then base_agent_params from caller.
+    if agent_config is not None:
+        resolved_agent_config = copy.deepcopy(agent_config)
+    elif base_agent_params is not None:
+        resolved_agent_config = copy.deepcopy(base_agent_params)
+    else:
+        resolved_agent_config = copy.deepcopy(default_agent_config)
+
+    # Fill any missing keys from defaults (without overriding caller-provided values).
+    for key, value in default_agent_config.items():
+        if key == "ppo_params":
+            resolved_agent_config.setdefault("ppo_params", {})
+            for param_key, param_value in value.items():
+                resolved_agent_config["ppo_params"].setdefault(param_key, copy.deepcopy(param_value))
+        else:
+            resolved_agent_config.setdefault(key, copy.deepcopy(value))
+
+    # Ensure max_total_timesteps exists for epsilon/annealing paths.
+    resolved_agent_config["max_total_timesteps"] = int(
+        resolved_agent_config.get("max_total_timesteps", max_total_timesteps) or max_total_timesteps
+    )
     if ignored_kwargs:
         print(
             f"[create_experiment6_result_stub] Ignoring unsupported kwargs: {', '.join(sorted(ignored_kwargs.keys()))}"
@@ -3594,9 +3629,25 @@ def evaluate_experiment6_checkpoint(
     _ = agent_eval.critic(dummy_state)
     print("   ✅ Models built successfully")
 
+    def _load_weights_with_compat(model, weights_path: str, label: str) -> None:
+        try:
+            model.load_weights(weights_path)
+            return
+        except Exception as primary_exc:
+            # Keras 2↔3 checkpoint object-path drift can sometimes be recovered via by_name.
+            try:
+                model.load_weights(weights_path, by_name=True, skip_mismatch=False)
+                print(f"   ⚠️ {label} loaded via by_name compatibility fallback")
+                return
+            except Exception as fallback_exc:
+                print(f"   ❌ {label} load failed (primary + by_name fallback)")
+                print(f"      primary: {type(primary_exc).__name__}: {primary_exc}")
+                print(f"      fallback: {type(fallback_exc).__name__}: {fallback_exc}")
+                raise primary_exc
+
     print(f"📂 Loading checkpoint weights...")
-    agent_eval.actor.load_weights(actor_weights_path)
-    agent_eval.critic.load_weights(critic_weights_path)
+    _load_weights_with_compat(agent_eval.actor, actor_weights_path, "actor")
+    _load_weights_with_compat(agent_eval.critic, critic_weights_path, "critic")
     print("   ✅ Weights loaded successfully")
 
     def _normalize_mode(name: str, *, fallback: str) -> str:
