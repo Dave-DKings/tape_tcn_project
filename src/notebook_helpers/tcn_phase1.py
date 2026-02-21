@@ -1806,6 +1806,13 @@ def run_experiment6_tape(
         return train_action_execution_beta_default
 
     update_log_interval = int(training_params.get("update_log_interval", 1))
+    alpha_diversity_log_interval = max(1, int(training_params.get("alpha_diversity_log_interval", 10)))
+    alpha_diversity_warning_after_updates = int(
+        training_params.get("alpha_diversity_warning_after_updates", 500)
+    )
+    alpha_diversity_warning_std_threshold = float(
+        training_params.get("alpha_diversity_warning_std_threshold", 0.3)
+    )
     print(f"\n🏗️ Creating THREE-COMPONENT TAPE v3 environments (with curriculum)...")
     print(f"   🎯 Reward System: TAPE (Three-Component v3)")
     print(f"   📊 Profile: {profile.get('name', 'BALANCED_GROWTH') if isinstance(profile, dict) else 'BALANCED_GROWTH'}")
@@ -3025,17 +3032,22 @@ def run_experiment6_tape(
                 f"rollout={current_timestep_rollout} | batch_size={current_batch_size_ppo}"
             )
             
-            # Alpha diversity logging every 10 updates
-            if update_count % 10 == 0:
+            # Alpha diversity logging cadence is configurable via training_params.
+            if update_count % alpha_diversity_log_interval == 0:
                 print(
                     f"   🔬 Alpha Diversity: mean={alpha_mean_val:.2f} | "
                     f"std={alpha_std_val:.2f} | "
                     f"range=[{alpha_min_val:.2f}, {alpha_max_val:.2f}]"
                 )
-                # Warning if alpha stuck (TCN not learning)
-                if update_count > 500 and alpha_std_val < 0.3:
+                # Warning if alpha seems stuck (TCN not learning asset discrimination).
+                if (
+                    update_count > alpha_diversity_warning_after_updates
+                    and alpha_std_val < alpha_diversity_warning_std_threshold
+                ):
                     print(
-                        f"   ⚠️  WARNING: Alpha std < 0.3 after {update_count} updates. "
+                        "   ⚠️  WARNING: "
+                        f"Alpha std < {alpha_diversity_warning_std_threshold:.2f} "
+                        f"after {update_count} updates. "
                         f"TCN may not be learning asset discrimination."
                     )
 

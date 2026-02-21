@@ -481,6 +481,9 @@ PHASE1_CONFIG = {
         "timesteps_per_ppo_update": 504,  # Frequent updates (matched to episode length) — archive used ~252
         "log_interval_episodes": 10,
         "update_log_interval": 20,
+        "alpha_diversity_log_interval": 10,
+        "alpha_diversity_warning_after_updates": 500,
+        "alpha_diversity_warning_std_threshold": 0.30,
         "save_freq_episodes": 50,
         "max_episode_length": None,  # Episode length controlled by curriculum
         
