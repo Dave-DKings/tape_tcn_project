@@ -266,6 +266,62 @@ def _infer_tcn_filters_from_checkpoint(checkpoint_prefix: str) -> Optional[List[
     return filters or None
 
 
+def _infer_fusion_input_signature_from_actor_weights(actor_weights_path: Union[str, Path]) -> Optional[Dict[str, int]]:
+    """
+    Infer fusion actor input signature from checkpoint kernels.
+
+    Returns:
+      {
+        "conv1_in_channels": int,            # asset_tcn_0_conv1 kernel input channels
+        "global_projection_in_dim": int,     # global_projection kernel input dim
+      }
+    """
+    path = Path(actor_weights_path)
+    if not path.exists():
+        return None
+
+    try:
+        import h5py  # type: ignore
+    except ImportError:
+        return None
+
+    try:
+        with h5py.File(path, "r") as handle:
+            layers_group = handle.get("layers")
+            if layers_group is None:
+                return None
+
+            conv1_in: Optional[int] = None
+            global_in: Optional[int] = None
+
+            for layer_name in layers_group.keys():
+                name = str(layer_name)
+                layer_group = layers_group.get(layer_name)
+                if layer_group is None:
+                    continue
+                vars_group = layer_group.get("vars")
+                if vars_group is None or "0" not in vars_group:
+                    continue
+                kernel_ds = vars_group["0"]
+                kernel_shape = tuple(int(x) for x in kernel_ds.shape)
+
+                if name.endswith("_asset_tcn_0_conv1") and len(kernel_shape) >= 3:
+                    # Conv1D kernel: (kernel_size, in_channels, out_channels)
+                    conv1_in = int(kernel_shape[1])
+                elif name.endswith("_global_projection") and len(kernel_shape) >= 2:
+                    # Dense kernel: (in_dim, out_dim)
+                    global_in = int(kernel_shape[0])
+
+            if conv1_in is None and global_in is None:
+                return None
+            return {
+                "conv1_in_channels": int(conv1_in or 0),
+                "global_projection_in_dim": int(global_in or 0),
+            }
+    except OSError:
+        return None
+
+
 @dataclass
 class Phase1Dataset:
     """Container for the processed feature set used in Phase 1 analysis."""
@@ -481,6 +537,9 @@ def _extract_effective_agent_params(
 
     common_keys = [
         "sequence_length",
+        "state_layout",
+        "asset_feature_dim",
+        "global_feature_dim",
         "dirichlet_alpha_activation",
         "dirichlet_epsilon",
         "dirichlet_exp_clip",
@@ -544,6 +603,70 @@ def _checkpoint_has_attention(actor_path: Union[str, Path]) -> bool:
             return found
     except Exception:
         return False
+
+
+def _infer_checkpoint_architecture_hints(
+    actor_path: Union[str, Path],
+    *,
+    fallback_architecture: str = "TCN",
+    fallback_use_attention: bool = False,
+    fallback_use_fusion: bool = False,
+) -> Dict[str, Any]:
+    """
+    Infer architecture flags directly from checkpoint contents/path.
+
+    Returns dict with:
+      - actor_critic_type
+      - use_attention
+      - use_fusion
+      - source (how inference was made)
+    """
+    actor_path = Path(actor_path)
+    path_l = str(actor_path).lower()
+
+    inferred_arch = str(fallback_architecture or "TCN").upper()
+    inferred_attention = bool(fallback_use_attention)
+    inferred_fusion = bool(fallback_use_fusion)
+    source = "fallback"
+
+    # Fast path-based hints.
+    if "tcn_fusion_results" in path_l:
+        inferred_arch, inferred_attention, inferred_fusion = "TCN_FUSION", False, True
+        source = "path"
+    elif "tcn_att_results" in path_l:
+        inferred_arch, inferred_attention, inferred_fusion = "TCN_ATTENTION", True, False
+        source = "path"
+
+    # Inspect HDF5 layer names when available.
+    try:
+        with h5py.File(actor_path, "r") as handle:
+            layers_group = handle.get("layers")
+            if layers_group is not None:
+                layer_names = [str(k).lower() for k in layers_group.keys()]
+                if any(name.startswith("tcn_fusion_actor") for name in layer_names):
+                    inferred_arch, inferred_attention, inferred_fusion = "TCN_FUSION", False, True
+                    source = "h5_layers"
+                elif any(name.startswith("tcn_attention_actor") for name in layer_names):
+                    inferred_arch, inferred_attention, inferred_fusion = "TCN_ATTENTION", True, False
+                    source = "h5_layers"
+                elif any(name.startswith("tcn_actor") for name in layer_names):
+                    inferred_arch = "TCN"
+                    inferred_fusion = False
+                    # Keep attention flag if generic attention layers exist.
+                    inferred_attention = any("attention" in name for name in layer_names)
+                    source = "h5_layers"
+                elif any(name.startswith("mlp_actor") for name in layer_names):
+                    inferred_arch, inferred_attention, inferred_fusion = "MLP", False, False
+                    source = "h5_layers"
+    except Exception:
+        pass
+
+    return {
+        "actor_critic_type": inferred_arch,
+        "use_attention": inferred_attention,
+        "use_fusion": inferred_fusion,
+        "source": source,
+    }
 
 
 @dataclass
@@ -2269,6 +2392,7 @@ def run_experiment6_tape(
     rare_max_turnover = rare_params.get("max_turnover")
     rare_top_n = int(rare_params.get("top_n", 5))
     rare_records: List[Dict[str, Any]] = []
+    saved_checkpoint_records: List[Dict[str, Any]] = []
     rare_dir = results_root / "rare_models"
     if rare_enabled:
         rare_dir.mkdir(parents=True, exist_ok=True)
@@ -2319,6 +2443,16 @@ def run_experiment6_tape(
             "paths": [actor_path, critic_path],
         }
         rare_records.append(record)
+        saved_checkpoint_records.append(
+            {
+                "type": "rare",
+                "episode": int(episode_idx),
+                "step": int(step) if "step" in locals() else None,
+                "sharpe": float(sharpe) if sharpe is not None else None,
+                "actor_path": actor_path,
+                "critic_path": critic_path,
+            }
+        )
         if rare_top_n > 0:
             rare_records.sort(key=lambda r: r["score"], reverse=True)
             while len(rare_records) > rare_top_n:
@@ -2342,6 +2476,16 @@ def run_experiment6_tape(
             prefix = results_root / f"exp{exp_idx}_tape_step{step_mark:06d}"
             agent.save_models(str(prefix))
             print(f"      💾 Periodic checkpoint saved: {prefix}_actor.weights.h5")
+            saved_checkpoint_records.append(
+                {
+                    "type": "periodic_step",
+                    "episode": None,
+                    "step": int(step_mark),
+                    "sharpe": None,
+                    "actor_path": f"{prefix}_actor.weights.h5",
+                    "critic_path": f"{prefix}_critic.weights.h5",
+                }
+            )
         last_periodic_checkpoint_bucket = current_bucket
 
     def _format_checkpoint_metric_tag(value: float) -> str:
@@ -2372,6 +2516,16 @@ def run_experiment6_tape(
             f"      💾 Step-Sharpe checkpoint saved: {prefix}_actor.weights.h5 "
             f"(Sharpe={sharpe_float:.3f})"
         )
+        saved_checkpoint_records.append(
+            {
+                "type": "step_sharpe",
+                "episode": int(episode_idx),
+                "step": int(current_step),
+                "sharpe": float(sharpe_float),
+                "actor_path": f"{prefix}_actor.weights.h5",
+                "critic_path": f"{prefix}_critic.weights.h5",
+            }
+        )
 
     def maybe_save_high_watermark_checkpoint(
         episode_idx: int,
@@ -2394,6 +2548,16 @@ def run_experiment6_tape(
         print(
             "      💾 Sharpe-threshold checkpoint saved: "
             f"{prefix}_actor.weights.h5 (Sharpe={sharpe_float:.3f})"
+        )
+        saved_checkpoint_records.append(
+            {
+                "type": "high_watermark",
+                "episode": int(episode_idx),
+                "step": int(step) if "step" in locals() else None,
+                "sharpe": float(sharpe_float),
+                "actor_path": f"{prefix}_actor.weights.h5",
+                "critic_path": f"{prefix}_critic.weights.h5",
+            }
         )
 
     high_watermark_checkpoint_enabled_cfg = bool(training_params.get("high_watermark_checkpoint_enabled", True))
@@ -2477,6 +2641,7 @@ def run_experiment6_tape(
         "step_sharpe_checkpoint_enabled": False,
         "step_sharpe_checkpoint_threshold": float(step_sharpe_checkpoint_threshold_cfg),
         "step_sharpe_checkpoint_subdir": "step_sharpe_checkpoints",
+        "saved_checkpoints_for_this_run": [],
     }
 
     effective_agent_params = _extract_effective_agent_params(
@@ -2489,12 +2654,12 @@ def run_experiment6_tape(
     resolved_architecture = str(effective_agent_params.get("resolved_architecture", arch_upper)).upper()
 
     unused_param_prefixes: List[str] = []
-    if resolved_architecture.startswith("TCN"):
-        unused_param_prefixes = ["tcn_"]
-    elif resolved_architecture.startswith("TCN"):
-        unused_param_prefixes = ["tcn_", "attention_", "fusion_"]
-    elif resolved_architecture.startswith("TCN"):
-        unused_param_prefixes = ["tcn_", "tcn_", "attention_", "fusion_"]
+    if resolved_architecture == "TCN":
+        unused_param_prefixes = ["attention_", "fusion_"]
+    elif resolved_architecture == "TCN_ATTENTION":
+        unused_param_prefixes = ["fusion_"]
+    elif resolved_architecture == "TCN_FUSION":
+        unused_param_prefixes = ["attention_"]
 
     architecture_unused_params = sorted(
         [
@@ -3231,11 +3396,30 @@ def run_experiment6_tape(
     checkpoint_prefix_path.parent.mkdir(parents=True, exist_ok=True)
     agent.save_models(str(checkpoint_prefix_path))
     print(f"💾 Final models saved: {checkpoint_prefix_path}_actor.weights.h5, {checkpoint_prefix_path}_critic.weights.h5")
+    saved_checkpoint_records.append(
+        {
+            "type": "final_high_watermark_style",
+            "episode": int(training_episode_count),
+            "step": int(step),
+            "sharpe": float(final_sharpe),
+            "actor_path": f"{checkpoint_prefix_path}_actor.weights.h5",
+            "critic_path": f"{checkpoint_prefix_path}_critic.weights.h5",
+        }
+    )
 
     try:
         with open(metadata_path, "r", encoding="utf-8") as f:
             metadata_latest = json.load(f)
         metadata_latest.setdefault("Checkpointing", {})
+        # De-duplicate by actor path while preserving insertion order.
+        unique_records: List[Dict[str, Any]] = []
+        seen_actor_paths: set = set()
+        for rec in saved_checkpoint_records:
+            actor_path = str(rec.get("actor_path", ""))
+            if actor_path in seen_actor_paths:
+                continue
+            seen_actor_paths.add(actor_path)
+            unique_records.append(rec)
         metadata_latest["Checkpointing"].update(
             {
                 "checkpoint_description": (
@@ -3244,6 +3428,8 @@ def run_experiment6_tape(
                 ),
                 "final_actor_weights_path": f"{checkpoint_prefix_path}_actor.weights.h5",
                 "final_critic_weights_path": f"{checkpoint_prefix_path}_critic.weights.h5",
+                "saved_checkpoints_for_this_run": unique_records,
+                "saved_checkpoints_count": int(len(unique_records)),
             }
         )
         with open(metadata_path, "w", encoding="utf-8") as f:
@@ -3336,6 +3522,7 @@ def evaluate_experiment6_checkpoint(
     checkpoint_path_override: Optional[str] = None,
     save_eval_logs: bool = True,
     save_eval_artifacts: bool = True,
+    load_only: bool = False,
 ) -> Experiment6Evaluation:
     """
     Evaluate Experiment 6 checkpoints (final/rare/clip) with deterministic + stochastic tests.
@@ -3517,6 +3704,7 @@ def evaluate_experiment6_checkpoint(
             results_root = _infer_results_root_from_actor_weights(path_obj)
 
     attention_needed = _infer_attention_from_checkpoint_path(actor_weights_path) or _checkpoint_has_attention(actor_weights_path)
+    fusion_signature = _infer_fusion_input_signature_from_actor_weights(actor_weights_path)
 
     print("🏗️ Recreating evaluation environments...")
     drawdown_constraint_eval = _prepare_drawdown_constraint(config, experiment6.architecture)
@@ -3593,14 +3781,95 @@ def evaluate_experiment6_checkpoint(
     state_dim = env_test_deterministic.observation_space.shape[0]
     stock_dim = env_test_deterministic.num_assets
     agent_config_eval = copy.deepcopy(experiment6.agent_config)
+    arch_hints = _infer_checkpoint_architecture_hints(
+        actor_weights_path,
+        fallback_architecture=str(agent_config_eval.get("actor_critic_type", experiment6.architecture or "TCN")),
+        fallback_use_attention=bool(agent_config_eval.get("use_attention", False)),
+        fallback_use_fusion=bool(agent_config_eval.get("use_fusion", False)),
+    )
+    if (
+        str(agent_config_eval.get("actor_critic_type", "")).upper() != str(arch_hints.get("actor_critic_type", "")).upper()
+        or bool(agent_config_eval.get("use_attention", False)) != bool(arch_hints.get("use_attention", False))
+        or bool(agent_config_eval.get("use_fusion", False)) != bool(arch_hints.get("use_fusion", False))
+    ):
+        print(
+            "   ⚠️ Adjusting agent architecture from checkpoint hints: "
+            f"{agent_config_eval.get('actor_critic_type')} -> {arch_hints['actor_critic_type']} "
+            f"(attention={arch_hints['use_attention']}, fusion={arch_hints['use_fusion']}, source={arch_hints['source']})"
+        )
+    agent_config_eval["actor_critic_type"] = str(arch_hints["actor_critic_type"]).upper()
+    agent_config_eval["use_attention"] = bool(arch_hints["use_attention"])
+    agent_config_eval["use_fusion"] = bool(arch_hints["use_fusion"])
     if attention_needed and experiment6.architecture.upper().startswith("TCN"):
         agent_config_eval["use_attention"] = True
     agent_config_eval["debug_prints"] = False
+    prefer_training_state_layout = bool(
+        config.get("training_params", {}).get("prefer_training_state_layout_for_eval", True)
+    )
     if hasattr(env_test_deterministic, "get_observation_layout"):
         try:
             eval_layout = env_test_deterministic.get_observation_layout()
             if isinstance(eval_layout, dict) and eval_layout:
-                agent_config_eval["state_layout"] = copy.deepcopy(eval_layout)
+                apply_env_layout = True
+                existing_layout = agent_config_eval.get("state_layout")
+                if (
+                    prefer_training_state_layout
+                    and isinstance(existing_layout, dict)
+                    and bool(existing_layout)
+                ):
+                    # Keep training-time layout unless we explicitly infer better from checkpoint.
+                    apply_env_layout = False
+                if (
+                    fusion_signature
+                    and str(agent_config_eval.get("actor_critic_type", "")).upper().startswith("TCN_FUSION")
+                ):
+                    ckpt_asset_dim = int(fusion_signature.get("conv1_in_channels", 0) or 0)
+                    ckpt_global_proj_in = int(fusion_signature.get("global_projection_in_dim", 0) or 0)
+                    env_asset_dim = int(eval_layout.get("asset_feature_dim", 0) or 0)
+                    env_global_dim = int(eval_layout.get("global_feature_dim", 0) or 0)
+                    env_local_flat_dim = int(eval_layout.get("local_flat_dim", stock_dim * max(env_asset_dim, 0)) or 0)
+
+                    layout_mismatch = (
+                        ckpt_asset_dim > 0
+                        and (
+                            ckpt_asset_dim != env_asset_dim
+                            or (
+                                ckpt_global_proj_in > 0
+                                and ckpt_global_proj_in not in {env_global_dim, env_local_flat_dim}
+                            )
+                        )
+                    )
+
+                    if layout_mismatch:
+                        apply_env_layout = False
+                        inferred_local_flat = stock_dim * max(ckpt_asset_dim, 0)
+                        inferred_global_dim = 0 if ckpt_global_proj_in == inferred_local_flat else max(ckpt_global_proj_in, 0)
+                        inferred_structured = inferred_global_dim > 0
+
+                        if inferred_structured:
+                            agent_config_eval["state_layout"] = {
+                                "structured_observation": True,
+                                "num_assets": int(stock_dim),
+                                "asset_feature_dim": int(ckpt_asset_dim),
+                                "global_feature_dim": int(inferred_global_dim),
+                                "local_flat_dim": int(inferred_local_flat),
+                                "total_observation_dim": int(inferred_local_flat + inferred_global_dim),
+                            }
+                        else:
+                            # Flat fallback: rely on actor input_dim split used during training.
+                            agent_config_eval.pop("state_layout", None)
+
+                        agent_config_eval["asset_feature_dim"] = int(ckpt_asset_dim)
+                        agent_config_eval["global_feature_dim"] = int(inferred_global_dim)
+                        print(
+                            "   ⚠️ Checkpoint/env layout mismatch detected. "
+                            f"checkpoint(conv1_in={ckpt_asset_dim}, global_proj_in={ckpt_global_proj_in}) "
+                            f"vs env(asset={env_asset_dim}, global={env_global_dim}). "
+                            f"Using {'structured' if inferred_structured else 'flat'} checkpoint-aligned inputs."
+                        )
+
+                if apply_env_layout:
+                    agent_config_eval["state_layout"] = copy.deepcopy(eval_layout)
         except Exception:
             pass
 
@@ -3640,6 +3909,10 @@ def evaluate_experiment6_checkpoint(
                 model.load_weights(weights_path, by_name=True, skip_mismatch=False)
                 print(f"   ⚠️ {label} loaded via by_name compatibility fallback")
                 return
+            except (TypeError, ValueError) as kw_exc:
+                # Keras 3 may reject by_name/skip_mismatch kwargs for this format.
+                print(f"   ❌ {label} load failed; by_name fallback unsupported in this runtime: {kw_exc}")
+                raise primary_exc
             except Exception as fallback_exc:
                 print(f"   ❌ {label} load failed (primary + by_name fallback)")
                 print(f"      primary: {type(primary_exc).__name__}: {primary_exc}")
@@ -3650,6 +3923,27 @@ def evaluate_experiment6_checkpoint(
     _load_weights_with_compat(agent_eval.actor, actor_weights_path, "actor")
     _load_weights_with_compat(agent_eval.critic, critic_weights_path, "critic")
     print("   ✅ Weights loaded successfully")
+
+    if load_only:
+        print("   ✅ Load-only compatibility check passed")
+        return Experiment6Evaluation(
+            actor_weights_path=actor_weights_path,
+            critic_weights_path=critic_weights_path,
+            deterministic_metrics={},
+            deterministic_portfolio=np.array([]),
+            deterministic_weights=np.array([]),
+            deterministic_actions=np.array([]),
+            deterministic_alphas=np.array([]),
+            stochastic_results=pd.DataFrame(),
+            stochastic_weights=[],
+            stochastic_actions=[],
+            stochastic_alphas=[],
+            eval_results_path="",
+            checkpoint_description=checkpoint_description,
+            agent=agent_eval,
+            env_test_deterministic=env_test_deterministic,
+            env_test_random=env_test_random,
+        )
 
     def _normalize_mode(name: str, *, fallback: str) -> str:
         value = (name or fallback).strip().lower()
@@ -4419,3 +4713,163 @@ def compare_agent_vs_baseline(
         "agent_volatility": float(agent_returns.std(ddof=1) * np.sqrt(252.0)),
         "baseline_volatility": float(baseline.std(ddof=1) * np.sqrt(252.0)),
     }
+
+
+def preflight_checkpoint_loadability(
+    *,
+    checkpoint_prefixes: Iterable[Union[str, Path]],
+    phase1_data: Phase1Dataset,
+    config: Dict[str, Any],
+    random_seed: int = 42,
+    use_covariance: bool = True,
+    architecture: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Fast compatibility scan: build agent/env and test checkpoint load only.
+
+    Useful before full evaluation to skip incompatible checkpoints.
+    """
+    rows: List[Dict[str, Any]] = []
+    cfg = copy.deepcopy(config)
+    inferred_arch = str(
+        architecture
+        or cfg.get("agent_params", {}).get("actor_critic_type", "TCN")
+    ).upper()
+    base_agent_params = copy.deepcopy(cfg.get("agent_params", {}))
+
+    for raw_prefix in checkpoint_prefixes:
+        prefix = str(raw_prefix)
+        actor_path = f"{prefix}_actor.weights.h5"
+        critic_path = f"{prefix}_critic.weights.h5"
+        hints = _infer_checkpoint_architecture_hints(
+            actor_path,
+            fallback_architecture=inferred_arch,
+            fallback_use_attention=bool(base_agent_params.get("use_attention", False)),
+            fallback_use_fusion=bool(base_agent_params.get("use_fusion", False)),
+        )
+        row: Dict[str, Any] = {
+            "checkpoint_prefix": prefix,
+            "actor_path": actor_path,
+            "critic_path": critic_path,
+            "exists_actor": Path(actor_path).exists(),
+            "exists_critic": Path(critic_path).exists(),
+            "inferred_architecture": hints.get("actor_critic_type"),
+            "inferred_use_attention": hints.get("use_attention"),
+            "inferred_use_fusion": hints.get("use_fusion"),
+            "inference_source": hints.get("source"),
+            "compatible": False,
+            "error_type": "",
+            "error_message": "",
+        }
+        if not row["exists_actor"] or not row["exists_critic"]:
+            row["error_type"] = "FileNotFoundError"
+            row["error_message"] = "Missing actor/critic weights file"
+            rows.append(row)
+            continue
+
+        stub_agent_params = copy.deepcopy(base_agent_params)
+        stub_agent_params["actor_critic_type"] = hints["actor_critic_type"]
+        stub_agent_params["use_attention"] = bool(hints["use_attention"])
+        stub_agent_params["use_fusion"] = bool(hints["use_fusion"])
+
+        stub = create_experiment6_result_stub(
+            random_seed=random_seed,
+            use_covariance=use_covariance,
+            architecture=str(hints["actor_critic_type"]).upper(),
+            checkpoint_path=prefix,
+            agent_config=stub_agent_params,
+            base_agent_params=None,
+        )
+        try:
+            _ = evaluate_experiment6_checkpoint(
+                experiment6=stub,
+                phase1_data=phase1_data,
+                config=cfg,
+                random_seed=random_seed,
+                checkpoint_path_override=prefix,
+                num_eval_runs=0,
+                deterministic_eval_mode="mean",
+                save_eval_logs=False,
+                save_eval_artifacts=False,
+                load_only=True,
+            )
+            row["compatible"] = True
+        except Exception as exc:
+            row["error_type"] = type(exc).__name__
+            row["error_message"] = str(exc)
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def load_run_checkpoint_prefixes_from_metadata(
+    metadata_path: Union[str, Path],
+    *,
+    results_root: Optional[Union[str, Path]] = None,
+    allowed_types: Optional[Iterable[str]] = None,
+    require_both_files: bool = True,
+) -> List[str]:
+    """
+    Read run-scoped checkpoint records from metadata and return checkpoint prefixes.
+
+    This avoids accidentally evaluating stale checkpoints from previous runs that
+    happen to coexist in the same results directory.
+    """
+    meta_path = Path(metadata_path)
+    if not meta_path.exists():
+        return []
+
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return []
+
+    checkpointing = payload.get("Checkpointing", {}) if isinstance(payload, dict) else {}
+    records = checkpointing.get("saved_checkpoints_for_this_run", [])
+    if not isinstance(records, list):
+        return []
+
+    allowed = {str(t) for t in allowed_types} if allowed_types is not None else None
+    root = Path(results_root) if results_root is not None else None
+
+    def _remap_to_root(path_obj: Path, root_dir: Path) -> Path:
+        if path_obj.exists():
+            return path_obj
+        parts = list(path_obj.parts)
+        for anchor_name in ("tcn_fusion_results", "tcn_att_results", "tcn_results"):
+            if anchor_name in parts:
+                idx = parts.index(anchor_name)
+                rel_tail = Path(*parts[idx + 1 :]) if idx + 1 < len(parts) else Path()
+                candidate = root_dir / rel_tail
+                if candidate.exists():
+                    return candidate
+        by_name = root_dir / path_obj.name
+        return by_name
+
+    prefixes: List[str] = []
+    seen: set = set()
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        rec_type = str(rec.get("type", ""))
+        if allowed is not None and rec_type not in allowed:
+            continue
+        actor_path = rec.get("actor_path")
+        critic_path = rec.get("critic_path")
+        if not actor_path or not critic_path:
+            continue
+        actor = Path(actor_path)
+        critic = Path(critic_path)
+        if root is not None:
+            actor = _remap_to_root(actor, root)
+            critic = _remap_to_root(critic, root)
+        if require_both_files and (not actor.exists() or not critic.exists()):
+            continue
+        prefix = str(actor).replace("_actor.weights.h5", "")
+        if prefix in seen:
+            continue
+        seen.add(prefix)
+        prefixes.append(prefix)
+
+    return prefixes
