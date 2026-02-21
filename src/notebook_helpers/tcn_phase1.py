@@ -339,21 +339,26 @@ def _latest_normal_checkpoint_prefix(results_root: Path, exp_idx: int) -> Option
     if not results_root.exists():
         return None
 
-    candidates: List[Tuple[int, int, Path]] = []
-    for pattern in (
-        f"exp{exp_idx}_tape_ep*_actor.weights.h5",
-        f"exp{exp_idx}_ep*_actor.weights.h5",
-    ):
-        for actor_path in results_root.glob(pattern):
+    candidates: List[Tuple[int, int, int, Path]] = []
+    search_specs = [
+        (results_root, f"exp{exp_idx}_tape_ep*_actor.weights.h5"),
+        (results_root, f"exp{exp_idx}_ep*_actor.weights.h5"),
+        # High-watermark style naming used by checkpoint policy and final save.
+        (results_root / "high_watermark_checkpoints", f"exp{exp_idx}_tape_hw_ep*_sh*_actor.weights.h5"),
+    ]
+    for search_dir, pattern in search_specs:
+        if not search_dir.exists():
+            continue
+        for actor_path in search_dir.glob(pattern):
             ep = _extract_episode_number_from_name(actor_path.name, exp_idx)
             if ep is None:
                 continue
-            # Prefer the new tape naming when episode numbers collide.
-            is_tape_name = int(f"exp{exp_idx}_tape_ep" in actor_path.name)
-            candidates.append((ep, is_tape_name, actor_path))
+            is_tape_name = int(f"exp{exp_idx}_tape_" in actor_path.name)
+            is_hw_name = int(f"exp{exp_idx}_tape_hw_ep" in actor_path.name)
+            candidates.append((ep, is_hw_name, is_tape_name, actor_path))
 
     if candidates:
-        latest_actor = max(candidates, key=lambda item: (item[0], item[1]))[2]
+        latest_actor = max(candidates, key=lambda item: (item[0], item[1], item[2]))[3]
         return Path(str(latest_actor).replace("_actor.weights.h5", ""))
 
     final_prefix_tape = results_root / f"exp{exp_idx}_tape_final"
@@ -1088,6 +1093,106 @@ def load_training_metadata_into_config(
     return config
 
 
+def _save_phase1_preparation_artifacts(
+    *,
+    config: Dict[str, Any],
+    processor: DataProcessor,
+    raw_df: pd.DataFrame,
+    engineered_full_df: pd.DataFrame,
+    engineered_analysis_df: pd.DataFrame,
+    normalized_master_df: pd.DataFrame,
+    train_norm_df: pd.DataFrame,
+    test_norm_df: pd.DataFrame,
+    feature_cols: List[str],
+    scalers: Dict[str, Any],
+    train_end_date: Optional[pd.Timestamp],
+    test_start_date: Optional[pd.Timestamp],
+    artifacts_dir: Optional[Union[str, Path]] = None,
+) -> Dict[str, str]:
+    """
+    Persist key phase-1 preparation artifacts for reproducibility and auditing.
+    """
+    base_path = Path(config.get("BASE_DATA_PATH", "data"))
+    if artifacts_dir is None:
+        configured = config.get("training_params", {}).get("phase1_artifacts_dir")
+        artifacts_root = Path(configured) if configured else (base_path / "phase1_preparation_artifacts")
+    else:
+        artifacts_root = Path(artifacts_dir)
+    artifacts_root.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stem = f"phase1_prep_{timestamp}"
+
+    paths = {
+        "raw_ohlcv": artifacts_root / f"{stem}_raw_ohlcv.csv",
+        "feature_engineered_full": artifacts_root / f"{stem}_feature_engineered_full.csv",
+        "feature_engineered_analysis_window": artifacts_root / f"{stem}_feature_engineered_analysis_window.csv",
+        "feature_engineered_normalized": artifacts_root / f"{stem}_feature_engineered_normalized.csv",
+        "train_normalized": artifacts_root / f"{stem}_train_normalized.csv",
+        "test_normalized": artifacts_root / f"{stem}_test_normalized.csv",
+        "scalers": artifacts_root / f"{stem}_scalers.joblib",
+        "audit_report": artifacts_root / f"{stem}_preparation_audit.json",
+    }
+
+    raw_df.to_csv(paths["raw_ohlcv"], index=False)
+    engineered_full_df.to_csv(paths["feature_engineered_full"], index=False)
+    engineered_analysis_df.to_csv(paths["feature_engineered_analysis_window"], index=False)
+    normalized_master_df.to_csv(paths["feature_engineered_normalized"], index=False)
+    train_norm_df.to_csv(paths["train_normalized"], index=False)
+    test_norm_df.to_csv(paths["test_normalized"], index=False)
+    processor.save_scalers(scalers, str(paths["scalers"]))
+
+    method_counts: Counter = Counter()
+    feature_methods: Dict[str, str] = {}
+    for col in feature_cols:
+        spec = scalers.get(col)
+        if isinstance(spec, dict):
+            method = str(spec.get("method", "unknown"))
+        elif spec is None:
+            method = "missing"
+        else:
+            method = "legacy_scaler"
+        method_counts[method] += 1
+        feature_methods[col] = method
+
+    binary_flag_cols = [
+        col for col in feature_cols
+        if col.endswith("_Flag") or col == "YieldCurve_Inverted_Flag"
+    ]
+    binary_flag_non_bounded = [
+        col for col in binary_flag_cols if feature_methods.get(col) != "bounded"
+    ]
+
+    train_max = pd.to_datetime(train_norm_df["Date"]).max() if not train_norm_df.empty else None
+    test_min = pd.to_datetime(test_norm_df["Date"]).min() if not test_norm_df.empty else None
+    split_non_overlap = bool(train_max < test_min) if (train_max is not None and test_min is not None) else False
+
+    audit_report = {
+        "timestamp": timestamp,
+        "train_end_date": str(pd.to_datetime(train_end_date)) if train_end_date is not None else None,
+        "test_start_date": str(pd.to_datetime(test_start_date)) if test_start_date is not None else None,
+        "split_check": {
+            "train_max_date": str(train_max) if train_max is not None else None,
+            "test_min_date": str(test_min) if test_min is not None else None,
+            "non_overlap_train_before_test": split_non_overlap,
+        },
+        "normalization": {
+            "fit_scope": "train_only",
+            "scaler_count": int(len(scalers)),
+            "feature_count": int(len(feature_cols)),
+            "method_counts": {k: int(v) for k, v in method_counts.items()},
+            "binary_flag_columns": binary_flag_cols,
+            "binary_flag_columns_non_bounded": binary_flag_non_bounded,
+        },
+        "artifact_paths": {k: str(v) for k, v in paths.items()},
+    }
+
+    with open(paths["audit_report"], "w", encoding="utf-8") as f:
+        json.dump(_json_ready(audit_report), f, indent=2)
+
+    return {k: str(v) for k, v in paths.items()}
+
+
 def configure_episode_length_curriculum(
     config: Dict,
     enable: bool,
@@ -1111,6 +1216,8 @@ def prepare_phase1_dataset(
     train_fraction: float = 0.8,
     scaler_type: str = "standard",
     force_download: bool = False,
+    save_preparation_artifacts: bool = True,
+    preparation_artifacts_dir: Optional[Union[str, Path]] = None,
 ) -> Phase1Dataset:
     """
     Run the exact Phase 1 feature-engineering pipeline and return splits.
@@ -1194,6 +1301,7 @@ def prepare_phase1_dataset(
     
     print(f"\n✅ Final master DF shape: {master_df.shape}")
     print(f"   ✅ Total features: {len(master_df.columns)}")
+    engineered_full_df = master_df.copy()
 
     # Ensure Date column is timezone-naive for downstream processing
     date_col = processor.date_col
@@ -1223,6 +1331,7 @@ def prepare_phase1_dataset(
         (master_df[date_col] >= pd.to_datetime(analysis_start)) &
         (master_df[date_col] <= pd.to_datetime(analysis_end))
     ].copy()
+    engineered_analysis_df = master_df.copy()
     
     unique_dates_filtered = sorted(master_df[date_col].unique())
     print(f"   ✅ Dates after filter: {len(unique_dates_filtered)} trading days")
@@ -1266,6 +1375,32 @@ def prepare_phase1_dataset(
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     print(f"\n💾 Saving NORMALISED master dataframe to '{destination}'")
     master_df_norm.to_csv(destination, index=False)
+
+    if save_preparation_artifacts:
+        saved_paths = _save_phase1_preparation_artifacts(
+            config=config,
+            processor=processor,
+            raw_df=raw_df,
+            engineered_full_df=engineered_full_df,
+            engineered_analysis_df=engineered_analysis_df,
+            normalized_master_df=master_df_norm,
+            train_norm_df=train_df_norm,
+            test_norm_df=test_df_norm,
+            feature_cols=feature_cols,
+            scalers=scalers,
+            train_end_date=train_end_date,
+            test_start_date=test_start_date,
+            artifacts_dir=preparation_artifacts_dir,
+        )
+        print("\n💾 Saved preparation artifacts:")
+        print(f"   raw OHLCV: {saved_paths['raw_ohlcv']}")
+        print(f"   full engineered: {saved_paths['feature_engineered_full']}")
+        print(f"   analysis-window engineered: {saved_paths['feature_engineered_analysis_window']}")
+        print(f"   normalized master: {saved_paths['feature_engineered_normalized']}")
+        print(f"   train normalized: {saved_paths['train_normalized']}")
+        print(f"   test normalized: {saved_paths['test_normalized']}")
+        print(f"   scalers: {saved_paths['scalers']}")
+        print(f"   audit report: {saved_paths['audit_report']}")
 
     return Phase1Dataset(
         master_df=master_df_norm,
@@ -2083,7 +2218,8 @@ def run_experiment6_tape(
         return metrics
 
     rare_params = config.get("training_params", {}).get("rare_checkpoint_params", {})
-    rare_enabled = rare_params.get("enable", False)
+    # Evaluation-focused checkpoint policy: disable rare checkpoint saves.
+    rare_enabled = False
     rare_min_sharpe = rare_params.get("min_sharpe", 1.6)
     rare_min_sortino = rare_params.get("min_sortino")
     rare_max_mdd = rare_params.get("max_mdd")
@@ -2221,7 +2357,8 @@ def run_experiment6_tape(
     high_watermark_sharpe_threshold_cfg = float(training_params.get("high_watermark_sharpe_threshold", 0.5))
     if high_watermark_sharpe_threshold_cfg < 0.5:
         high_watermark_sharpe_threshold_cfg = 0.5
-    step_sharpe_checkpoint_enabled_cfg = bool(training_params.get("step_sharpe_checkpoint_enabled", False))
+    # Evaluation-focused checkpoint policy: disable step-sharpe saves.
+    step_sharpe_checkpoint_enabled_cfg = False
     step_sharpe_checkpoint_threshold_cfg = float(training_params.get("step_sharpe_checkpoint_threshold", 0.5))
 
     print(f"\n🎯 Starting THREE-COMPONENT TAPE v3 training (with curriculum)...")
@@ -2263,13 +2400,7 @@ def run_experiment6_tape(
         )
     else:
         print("   🏆 High-Watermark checkpoints: disabled")
-    if step_sharpe_checkpoint_enabled_cfg:
-        print(
-            "   🧷 Step-Sharpe checkpoints: "
-            f"enabled (save every step with Sharpe >= {step_sharpe_checkpoint_threshold_cfg:.2f})"
-        )
-    else:
-        print("   🧷 Step-Sharpe checkpoints: disabled")
+    print("   🧷 Step-Sharpe checkpoints: disabled")
 
     metadata_path = log_dir / f"{training_log_prefix}_metadata.json"
     feature_manifest_path = log_dir / f"{training_log_prefix}_active_feature_manifest.json"
@@ -2290,17 +2421,17 @@ def run_experiment6_tape(
     actuarial_cfg = feature_params.get("actuarial_params", {}) if isinstance(feature_params, dict) else {}
     actuarial_columns = sorted([col for col in phase1_data.master_df.columns if "Actuarial_" in col])
     checkpoint_strategy = {
-        "normal_checkpoint_naming": "exp{exp_idx}_tape_epNN",
+        "normal_checkpoint_naming": "exp{exp_idx}_tape_hw_ep{episode:05d}_sh{tag}",
         "normal_checkpoint_selection": "latest_episode",
-        "rare_checkpoint_selection": "best_sharpe_then_episode",
+        "rare_checkpoint_selection": "disabled",
         "legacy_final_alias_supported": True,
-        "tape_checkpoint_threshold_bonus": float(training_params.get("tape_checkpoint_threshold", 4.0)),
-        "periodic_checkpoint_every_steps": int(training_params.get("periodic_checkpoint_every_steps", 10_000)),
+        "tape_checkpoint_threshold_bonus": None,
+        "periodic_checkpoint_every_steps": 0,
         "high_watermark_checkpoint_enabled": bool(high_watermark_checkpoint_enabled_cfg),
         "high_watermark_sharpe_threshold": float(high_watermark_sharpe_threshold_cfg),
         "high_watermark_checkpoint_subdir": "high_watermark_checkpoints",
         "high_watermark_logic": "save_on_every_episode_sharpe_threshold",
-        "step_sharpe_checkpoint_enabled": bool(step_sharpe_checkpoint_enabled_cfg),
+        "step_sharpe_checkpoint_enabled": False,
         "step_sharpe_checkpoint_threshold": float(step_sharpe_checkpoint_threshold_cfg),
         "step_sharpe_checkpoint_subdir": "step_sharpe_checkpoints",
     }
@@ -2420,8 +2551,9 @@ def run_experiment6_tape(
     training_episode_count = 0
     step = 0
     done = False
+    save_tape_bonus_checkpoints = False
     tape_threshold = float(training_params.get("tape_checkpoint_threshold", 4.0))
-    periodic_checkpoint_every_steps = int(training_params.get("periodic_checkpoint_every_steps", 10_000))
+    periodic_checkpoint_every_steps = 0
     high_watermark_checkpoint_enabled = bool(high_watermark_checkpoint_enabled_cfg)
     high_watermark_sharpe_threshold = float(high_watermark_sharpe_threshold_cfg)
     high_watermark_checkpoint_dir = results_root / "high_watermark_checkpoints"
@@ -2566,12 +2698,6 @@ def run_experiment6_tape(
                 }
                 step_diag_csv_logger.log(step_diag_row)
 
-            maybe_save_step_sharpe_checkpoint(
-                current_step=step,
-                episode_idx=training_episode_count + 1,
-                step_info=info,
-            )
-
             if done or truncated:
                 training_episode_count += 1
                 episode_terminal_info = info.copy()
@@ -2683,33 +2809,31 @@ def run_experiment6_tape(
                         else:
                             print("      🚦 Gate A applied: forcing non-positive terminal bonus.")
 
-                    def save_tape_checkpoint(suffix: str, reason: str) -> None:
-                        results_root.mkdir(parents=True, exist_ok=True)
-                        prefix_path = results_root / f"exp{exp_idx}_{suffix}"
-                        agent.save_models(str(prefix_path))
-                        print(f"      💾 {reason} saved: {prefix_path}_actor.weights.h5")
+                    if save_tape_bonus_checkpoints:
+                        def save_tape_checkpoint(suffix: str, reason: str) -> None:
+                            results_root.mkdir(parents=True, exist_ok=True)
+                            prefix_path = results_root / f"exp{exp_idx}_{suffix}"
+                            agent.save_models(str(prefix_path))
+                            print(f"      💾 {reason} saved: {prefix_path}_actor.weights.h5")
 
-                    if tape_bonus_clipped >= tape_threshold:
-                        save_tape_checkpoint(
-                            f"tape_ep{training_episode_count}",
-                            "TAPE threshold checkpoint",
-                        )
+                        if tape_bonus_clipped >= tape_threshold:
+                            save_tape_checkpoint(
+                                f"tape_ep{training_episode_count}",
+                                "TAPE threshold checkpoint",
+                            )
 
-                    if did_clip and not last_tape_bonus_clipped:
-                        save_tape_checkpoint(
-                            f"tape_clip_ep{training_episode_count}",
-                            "TAPE clip checkpoint",
-                        )
-                        last_tape_bonus_clipped = True
-                    elif not did_clip:
-                        last_tape_bonus_clipped = False
+                        if did_clip and not last_tape_bonus_clipped:
+                            save_tape_checkpoint(
+                                f"tape_clip_ep{training_episode_count}",
+                                "TAPE clip checkpoint",
+                            )
+                            last_tape_bonus_clipped = True
+                        elif not did_clip:
+                            last_tape_bonus_clipped = False
 
                 maybe_save_high_watermark_checkpoint(training_episode_count, metrics_current)
-                maybe_save_rare_checkpoint(training_episode_count, metrics_current)
                 obs, info = env_train.reset()
                 done = False
-
-        maybe_save_periodic_checkpoint(step)
 
         new_turnover_scalar = get_current_turnover_scalar(step)
         if new_turnover_scalar != current_turnover_scalar:
@@ -3050,7 +3174,13 @@ def run_experiment6_tape(
     if step_diag_csv_logger is not None:
         step_diag_csv_logger.close()
 
-    checkpoint_prefix_path = _next_incremental_checkpoint_prefix(results_root, exp_idx)
+    final_sharpe = float(to_scalar(last_episode_metrics.get("episode_sharpe", 0.0)) or 0.0)
+    final_sharpe_tag = _format_checkpoint_metric_tag(final_sharpe)
+    checkpoint_prefix_path = (
+        high_watermark_checkpoint_dir
+        / f"exp{exp_idx}_tape_hw_ep{int(training_episode_count):05d}_sh{final_sharpe_tag}"
+    )
+    checkpoint_prefix_path.parent.mkdir(parents=True, exist_ok=True)
     agent.save_models(str(checkpoint_prefix_path))
     print(f"💾 Final models saved: {checkpoint_prefix_path}_actor.weights.h5, {checkpoint_prefix_path}_critic.weights.h5")
 
@@ -3060,7 +3190,10 @@ def run_experiment6_tape(
         metadata_latest.setdefault("Checkpointing", {})
         metadata_latest["Checkpointing"].update(
             {
-                "checkpoint_description": f"Normal checkpoint episode {checkpoint_prefix_path.name.split('_ep')[-1]}",
+                "checkpoint_description": (
+                    f"Final high-watermark-style checkpoint episode {training_episode_count} "
+                    f"(Sharpe={final_sharpe:.3f})"
+                ),
                 "final_actor_weights_path": f"{checkpoint_prefix_path}_actor.weights.h5",
                 "final_critic_weights_path": f"{checkpoint_prefix_path}_critic.weights.h5",
             }
