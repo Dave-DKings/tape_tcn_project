@@ -564,6 +564,18 @@ PHASE1_CONFIG = {
             {"threshold": 70_000, "lr": 0.00001},
         ],
 
+        # Regime-Adaptive KL controller (disabled by default).
+        # If enabled, target_kl is adjusted online from observed approx_kl.
+        "ra_kl_enabled": False,
+        "ra_kl_target_ratio": 1.0,
+        "ra_kl_ema_alpha": 0.25,
+        "ra_kl_gain": 0.06,
+        "ra_kl_deadband": 0.10,
+        "ra_kl_max_change_fraction": 0.10,
+        # Bounds are absolute values for target_kl when RA-KL is enabled.
+        "ra_kl_min_target_kl": 0.008,
+        "ra_kl_max_target_kl": 0.040,
+
         # Turnover curriculum matching 2.0 → 1.75 → 1.50 → 1.25 request
         "turnover_penalty_curriculum": {
             0: 0.75,
@@ -796,6 +808,16 @@ PHASE2_CONFIG = {
             {"threshold": 40_000, "lr": 0.000015},
             {"threshold": 70_000, "lr": 0.00001},
         ],
+
+        # Regime-Adaptive KL controller (disabled by default).
+        "ra_kl_enabled": False,
+        "ra_kl_target_ratio": 1.0,
+        "ra_kl_ema_alpha": 0.25,
+        "ra_kl_gain": 0.06,
+        "ra_kl_deadband": 0.10,
+        "ra_kl_max_change_fraction": 0.10,
+        "ra_kl_min_target_kl": 0.008,
+        "ra_kl_max_target_kl": 0.040,
 
         # Progressive reward thresholding identical to Phase 1
         "use_progressive_threshold": True,

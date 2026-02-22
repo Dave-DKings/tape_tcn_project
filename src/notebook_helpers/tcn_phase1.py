@@ -757,6 +757,12 @@ TRAINING_FIELDNAMES: List[str] = [
     "policy_loss",
     "entropy_loss",
     "approx_kl",
+    "target_kl_active",
+    "kl_stop_threshold_active",
+    "ra_kl_enabled",
+    "ra_kl_ema_approx_kl",
+    "ra_kl_error_ratio",
+    "ra_kl_adjust_factor",
     "clip_fraction",
     "value_clip_fraction",
     "explained_variance",
@@ -794,6 +800,14 @@ EVALUATION_EXTRA_FIELDNAMES: List[str] = [
     "volatility",
     "turnover",
     "turnover_pct",
+    "turnover_step_mean",
+    "turnover_step_p95",
+    "turnover_step_max",
+    "turnover_target_step",
+    "turnover_exceed_rate",
+    "turnover_excess_mean",
+    "raw_turnover_step_mean",
+    "executed_to_raw_turnover_ratio",
     "win_rate",
     "action_uniques",
     "alpha_le1_fraction",
@@ -1187,6 +1201,14 @@ def load_training_metadata_into_config(
         "action_execution_beta_curriculum",
         "evaluation_action_execution_beta",
         "evaluation_turnover_penalty_scalar",
+        "ra_kl_enabled",
+        "ra_kl_target_ratio",
+        "ra_kl_ema_alpha",
+        "ra_kl_gain",
+        "ra_kl_deadband",
+        "ra_kl_max_change_fraction",
+        "ra_kl_min_target_kl",
+        "ra_kl_max_target_kl",
     ):
         if key in train_meta:
             training_params[key] = copy.deepcopy(train_meta[key])
@@ -1239,6 +1261,7 @@ def load_training_metadata_into_config(
         else:
             print(f"   PPO update timesteps: {training_params.get('timesteps_per_ppo_update')}")
         print(f"   Episode length curriculum: {training_params.get('use_episode_length_curriculum')}")
+        print(f"   RA-KL enabled: {bool(training_params.get('ra_kl_enabled', False))}")
         print(f"   Profile override loaded: {'tape_profile_override' in env_params}")
         print(
             f"   Credit assignment mode: "
@@ -2314,6 +2337,34 @@ def run_experiment6_tape(
         source_note = " (auto from rollout/4)" if batch_size_auto_from_rollout else ""
         print(f"   🧺 PPO batch-size schedule: {batch_schedule_pretty}{source_note}")
 
+    # Regime-Adaptive KL (RA-KL): adjust target_kl online using observed approx_kl.
+    ra_kl_enabled = bool(training_params.get("ra_kl_enabled", False))
+    ra_kl_base_target = float(max(agent.target_kl, 0.0))
+    if ra_kl_enabled and ra_kl_base_target <= 0.0:
+        print("   ⚠️ RA-KL disabled because initial target_kl <= 0.")
+        ra_kl_enabled = False
+    ra_kl_target_ratio = float(training_params.get("ra_kl_target_ratio", 1.0))
+    ra_kl_ema_alpha = float(np.clip(training_params.get("ra_kl_ema_alpha", 0.25), 0.01, 1.0))
+    ra_kl_gain = float(max(training_params.get("ra_kl_gain", 0.06), 0.0))
+    ra_kl_deadband = float(max(training_params.get("ra_kl_deadband", 0.10), 0.0))
+    ra_kl_max_change_fraction = float(
+        np.clip(training_params.get("ra_kl_max_change_fraction", 0.10), 0.0, 0.95)
+    )
+    default_ra_kl_min = max(1e-6, ra_kl_base_target * 0.5)
+    default_ra_kl_max = max(default_ra_kl_min, ra_kl_base_target * 2.0)
+    ra_kl_min_target_kl = float(max(training_params.get("ra_kl_min_target_kl", default_ra_kl_min), 1e-6))
+    ra_kl_max_target_kl = float(
+        max(training_params.get("ra_kl_max_target_kl", default_ra_kl_max), ra_kl_min_target_kl)
+    )
+    if ra_kl_enabled:
+        print(
+            "   🧭 RA-KL controller: "
+            f"enabled (ratio={ra_kl_target_ratio:.2f}, ema_alpha={ra_kl_ema_alpha:.2f}, "
+            f"gain={ra_kl_gain:.3f}, deadband=±{ra_kl_deadband:.2f}, "
+            f"max_change={ra_kl_max_change_fraction:.2f}, "
+            f"bounds=[{ra_kl_min_target_kl:.4f}, {ra_kl_max_target_kl:.4f}])"
+        )
+
     log_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = results_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -2725,6 +2776,15 @@ def run_experiment6_tape(
             "evaluation_turnover_penalty_scalar": eval_turnover_scalar,
             "log_step_diagnostics": bool(step_diagnostics_enabled),
             "gamma": gamma_cfg,
+            "ra_kl_enabled": bool(ra_kl_enabled),
+            "ra_kl_target_ratio": ra_kl_target_ratio,
+            "ra_kl_ema_alpha": ra_kl_ema_alpha,
+            "ra_kl_gain": ra_kl_gain,
+            "ra_kl_deadband": ra_kl_deadband,
+            "ra_kl_max_change_fraction": ra_kl_max_change_fraction,
+            "ra_kl_min_target_kl": ra_kl_min_target_kl,
+            "ra_kl_max_target_kl": ra_kl_max_target_kl,
+            "ra_kl_initial_target_kl": ra_kl_base_target,
         },
         "Reward_and_Environment": {
             "dsr_scalar": dsr_scalar_cfg,
@@ -2829,6 +2889,9 @@ def run_experiment6_tape(
     current_timestep_rollout = determine_timesteps_per_update(0)
     current_batch_size_ppo = determine_batch_size_ppo(0, current_timestep_rollout)
     update_count = 0
+    ra_kl_ema_approx_kl: Optional[float] = None
+    ra_kl_last_error_ratio = 0.0
+    ra_kl_last_adjust_factor = 1.0
 
     while step < max_total_timesteps:
         update_count += 1
@@ -3108,6 +3171,39 @@ def run_experiment6_tape(
         ratio_mean_value = update_metrics.get("ratio_mean", 0.0)
         ratio_std_value = update_metrics.get("ratio_std", 0.0)
 
+        if ra_kl_enabled:
+            approx_kl_scalar = to_scalar(approx_kl_value)
+            if approx_kl_scalar is not None and np.isfinite(approx_kl_scalar):
+                approx_kl_obs = float(max(approx_kl_scalar, 0.0))
+                if ra_kl_ema_approx_kl is None:
+                    ra_kl_ema_approx_kl = approx_kl_obs
+                else:
+                    ra_kl_ema_approx_kl = (
+                        (1.0 - ra_kl_ema_alpha) * ra_kl_ema_approx_kl
+                        + ra_kl_ema_alpha * approx_kl_obs
+                    )
+
+                current_target_kl = float(max(agent.target_kl, 1e-8))
+                kl_ratio = float(ra_kl_ema_approx_kl / current_target_kl)
+                ra_kl_last_error_ratio = float(kl_ratio - ra_kl_target_ratio)
+                ra_kl_last_adjust_factor = 1.0
+
+                if abs(ra_kl_last_error_ratio) > ra_kl_deadband:
+                    raw_factor = float(np.exp(-ra_kl_gain * ra_kl_last_error_ratio))
+                    low = 1.0 - ra_kl_max_change_fraction
+                    high = 1.0 + ra_kl_max_change_fraction
+                    ra_kl_last_adjust_factor = float(np.clip(raw_factor, low, high))
+
+                new_target_kl = float(
+                    np.clip(
+                        current_target_kl * ra_kl_last_adjust_factor,
+                        ra_kl_min_target_kl,
+                        ra_kl_max_target_kl,
+                    )
+                )
+                if not np.isclose(new_target_kl, current_target_kl):
+                    agent.target_kl = new_target_kl
+
         if np.isnan(actor_loss_value) or np.isinf(actor_loss_value):
             print(f"\n❌ CRITICAL ERROR: NaN/Inf detected in actor_loss at update {update_count}!")
             print(f"   Actor Loss: {actor_loss_value}")
@@ -3232,6 +3328,16 @@ def run_experiment6_tape(
                 f"critic_lr={agent.get_critic_lr():.6f} | target_kl={agent.target_kl:.4f} | "
                 f"rollout={current_timestep_rollout} | batch_size={current_batch_size_ppo}"
             )
+            if ra_kl_enabled:
+                effective_kl_threshold = float(agent.target_kl * agent.kl_stop_multiplier)
+                ema_display = float(ra_kl_ema_approx_kl) if ra_kl_ema_approx_kl is not None else 0.0
+                print(
+                    "   🧭 RA-KL: "
+                    f"ema_kl={ema_display:.5f} | "
+                    f"error_ratio={ra_kl_last_error_ratio:+.3f} | "
+                    f"adjust={ra_kl_last_adjust_factor:.3f} | "
+                    f"stop_threshold={effective_kl_threshold:.5f}"
+                )
             
             # Alpha diversity logging cadence is configurable via training_params.
             if update_count % alpha_diversity_log_interval == 0:
@@ -3314,6 +3420,12 @@ def run_experiment6_tape(
                     "policy_loss": policy_loss_val,
                     "entropy_loss": entropy_loss_val,
                     "approx_kl": approx_kl_val,
+                    "target_kl_active": float(agent.target_kl),
+                    "kl_stop_threshold_active": float(agent.target_kl * agent.kl_stop_multiplier),
+                    "ra_kl_enabled": bool(ra_kl_enabled),
+                    "ra_kl_ema_approx_kl": float(ra_kl_ema_approx_kl) if ra_kl_ema_approx_kl is not None else np.nan,
+                    "ra_kl_error_ratio": float(ra_kl_last_error_ratio) if ra_kl_enabled else np.nan,
+                    "ra_kl_adjust_factor": float(ra_kl_last_adjust_factor) if ra_kl_enabled else np.nan,
                     "clip_fraction": clip_fraction_val,
                     "value_clip_fraction": value_clip_fraction_val,
                     "explained_variance": explained_variance_val,
@@ -4313,12 +4425,21 @@ def evaluate_experiment6_checkpoint(
         step_count = 0
         run_actions_list = []  # Track actions for this run
         run_alphas_list = []   # Track alphas for this run
+        run_turnover_list: List[float] = []
+        run_raw_turnover_list: List[float] = []
 
         while not done:
             action, _, _, alpha_values = _eval_policy_action(obs, sto_mode)
             run_actions_list.append(action.numpy().copy())  # Convert to numpy first
             run_alphas_list.append(alpha_values.copy())  # Already numpy from helper
             obs, reward, done, truncated, info = env_test_random.step(action)
+            step_info = info if isinstance(info, dict) else {}
+            turnover_val = step_info.get("turnover")
+            raw_turnover_val = step_info.get("raw_turnover")
+            if turnover_val is not None:
+                run_turnover_list.append(float(turnover_val))
+            if raw_turnover_val is not None:
+                run_raw_turnover_list.append(float(raw_turnover_val))
             step_count += 1
             if done or truncated:
                 break
@@ -4357,6 +4478,28 @@ def evaluate_experiment6_checkpoint(
         run_actions = np.array(run_actions_list)
         run_alphas = np.array(run_alphas_list)
         constraint_diag_run = _constraint_diagnostics_from_env(env_test_random)
+        turnover_step_values = np.asarray(run_turnover_list, dtype=np.float64)
+        turnover_step_values = turnover_step_values[np.isfinite(turnover_step_values)]
+        raw_turnover_step_values = np.asarray(run_raw_turnover_list, dtype=np.float64)
+        raw_turnover_step_values = raw_turnover_step_values[np.isfinite(raw_turnover_step_values)]
+        turnover_step_mean = float(np.mean(turnover_step_values)) if turnover_step_values.size else 0.0
+        turnover_step_p95 = float(np.percentile(turnover_step_values, 95)) if turnover_step_values.size else 0.0
+        turnover_step_max = float(np.max(turnover_step_values)) if turnover_step_values.size else 0.0
+        raw_turnover_step_mean = float(np.mean(raw_turnover_step_values)) if raw_turnover_step_values.size else 0.0
+        turnover_target_step = float(getattr(env_test_random, "target_turnover_per_step", 0.0) or 0.0)
+        if turnover_step_values.size and turnover_target_step > 0.0:
+            turnover_exceed_rate = float(np.mean(turnover_step_values > turnover_target_step))
+            turnover_excess_mean = float(
+                np.mean(np.maximum(0.0, turnover_step_values - turnover_target_step))
+            )
+        else:
+            turnover_exceed_rate = 0.0
+            turnover_excess_mean = 0.0
+        executed_to_raw_turnover_ratio = (
+            float(turnover_step_mean / max(raw_turnover_step_mean, 1e-12))
+            if raw_turnover_step_mean > 0.0
+            else 0.0
+        )
 
         run_final_value = float(portfolio_history_run[-1]) if len(portfolio_history_run) else None
         eval_row = _build_training_metrics_row(
@@ -4392,6 +4535,14 @@ def evaluate_experiment6_checkpoint(
                 "volatility": metrics_run.get("volatility", 0.0),
                 "turnover": metrics_run.get("turnover", 0.0),
                 "turnover_pct": metrics_run.get("turnover", 0.0) * 100.0,
+                "turnover_step_mean": turnover_step_mean,
+                "turnover_step_p95": turnover_step_p95,
+                "turnover_step_max": turnover_step_max,
+                "turnover_target_step": turnover_target_step,
+                "turnover_exceed_rate": turnover_exceed_rate,
+                "turnover_excess_mean": turnover_excess_mean,
+                "raw_turnover_step_mean": raw_turnover_step_mean,
+                "executed_to_raw_turnover_ratio": executed_to_raw_turnover_ratio,
                 "win_rate": metrics_run.get("win_rate", 0.0),
                 "action_uniques": _count_unique_rows(run_actions),
                 "alpha_le1_fraction": float(np.mean(run_alphas <= 1.0)) if run_alphas.size else 0.0,
@@ -4421,6 +4572,14 @@ def evaluate_experiment6_checkpoint(
                 "volatility": metrics_run["volatility"],
                 "turnover": metrics_run["turnover"],
                 "turnover_pct": metrics_run["turnover"] * 100.0,
+                "turnover_step_mean": turnover_step_mean,
+                "turnover_step_p95": turnover_step_p95,
+                "turnover_step_max": turnover_step_max,
+                "turnover_target_step": turnover_target_step,
+                "turnover_exceed_rate": turnover_exceed_rate,
+                "turnover_excess_mean": turnover_excess_mean,
+                "raw_turnover_step_mean": raw_turnover_step_mean,
+                "executed_to_raw_turnover_ratio": executed_to_raw_turnover_ratio,
                 "win_rate": metrics_run["win_rate"],
                 "mean_concentration_hhi": constraint_diag_run["mean_concentration_hhi"],
                 "mean_top_weight": constraint_diag_run["mean_top_weight"],
@@ -4440,6 +4599,28 @@ def evaluate_experiment6_checkpoint(
         print(f"   Annualized Return: {annualized_return_run*100:+.2f}%")
         print(f"   Sharpe: {metrics_run['sharpe_ratio']:.4f}")
         print(f"   Max DD: {metrics_run['max_drawdown_abs']*100:.2f}%")
+        print(
+            "   Turnover (episode): "
+            f"{metrics_run['turnover']*100:.2f}%"
+        )
+        print(
+            "   Turnover (step): "
+            f"mean={turnover_step_mean*100:.3f}% | "
+            f"p95={turnover_step_p95*100:.3f}% | "
+            f"max={turnover_step_max*100:.3f}%"
+        )
+        if turnover_target_step > 0.0:
+            print(
+                "   Turnover vs target: "
+                f"target={turnover_target_step*100:.3f}% | "
+                f"exceed_rate={turnover_exceed_rate*100:.1f}% | "
+                f"mean_excess={turnover_excess_mean*100:.3f}%"
+            )
+        print(
+            "   Raw/Executed turnover: "
+            f"raw_mean={raw_turnover_step_mean*100:.3f}% | "
+            f"executed/raw={executed_to_raw_turnover_ratio:.3f}"
+        )
 
     df_stochastic = pd.DataFrame(stochastic_records)
 
@@ -4476,6 +4657,14 @@ def evaluate_experiment6_checkpoint(
         print("\nTurnover (%):")
         print(f"   Mean: {df_stochastic['turnover'].mean()*100:.2f}%")
         print(f"   Std:  {df_stochastic['turnover'].std()*100:.2f}%")
+        if "turnover_step_mean" in df_stochastic.columns:
+            print("\nTurnover Step Detail (%):")
+            print(f"   Mean(step mean): {df_stochastic['turnover_step_mean'].mean()*100:.3f}%")
+            print(f"   Mean(step p95):  {df_stochastic['turnover_step_p95'].mean()*100:.3f}%")
+            print(f"   Mean(step max):  {df_stochastic['turnover_step_max'].mean()*100:.3f}%")
+            print(f"   Mean exceed rate: {df_stochastic['turnover_exceed_rate'].mean()*100:.1f}%")
+            print(f"   Mean excess over target: {df_stochastic['turnover_excess_mean'].mean()*100:.3f}%")
+            print(f"   Mean executed/raw ratio: {df_stochastic['executed_to_raw_turnover_ratio'].mean():.3f}")
     else:
         print("\n💡 Skipped stochastic evaluation (num_eval_runs=0)")
 
