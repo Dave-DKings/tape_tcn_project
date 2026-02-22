@@ -3625,7 +3625,7 @@ def evaluate_experiment6_checkpoint(
     rare_model_strategy: str = "best",
     num_eval_runs: int = 10,
     stochastic_episode_length_limit: int = 252,
-    sample_actions: Optional[bool] = False,
+    sample_actions: Optional[bool] = None,
     sample_actions_deterministic: Optional[bool] = None,
     sample_actions_stochastic: Optional[bool] = None,
     deterministic_eval_mode: str = "mode",
