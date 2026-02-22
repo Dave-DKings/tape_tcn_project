@@ -535,24 +535,30 @@ PHASE1_CONFIG = {
             8000: 0.50     # Episodes 8001-20000: Target threshold
         },
 
-        # Rare checkpoint capture (high-performance snapshots)
+        # Checkpointing default: periodic deterministic validation is the primary selector.
+        "deterministic_validation_checkpointing_enabled": True,
+        "deterministic_validation_eval_every_episodes": 5,
+        "deterministic_validation_mode": "mean",
+        "deterministic_validation_episode_length_limit": None,  # None = full validation horizon
+        "deterministic_validation_sharpe_min": 0.5,
+        "deterministic_validation_sharpe_min_delta": 0.0,
+        "deterministic_validation_seed_offset": 10_000,
+        # If True, legacy checkpoint routes remain disabled even if toggled elsewhere.
+        "deterministic_validation_checkpointing_only": True,
+
+        # Legacy checkpoint routes (disabled by default).
         "rare_checkpoint_params": {
-            "enable": True,
+            "enable": False,
             "min_sharpe": 1.5,
             "min_sortino": 2.0,
             "max_mdd": 0.15,          # 15% drawdown
             "max_turnover": 0.80,     # 80% daily turnover
             "top_n": 5
         },
-        # TAPE checkpoint trigger uses clipped terminal-bonus scale.
-        # With signed mode + baseline 0.20 + scalar 10, 4.0 ~= tape_score >= 0.52.
-        "tape_checkpoint_threshold": 4.0,
-        # Periodic safety snapshots independent of TAPE threshold.
-        "periodic_checkpoint_every_steps": 10_000,
-        # Episode-level high-watermark snapshots (save on new best Sharpe >= threshold).
-        "high_watermark_checkpoint_enabled": True,
+        "tape_checkpoint_threshold": 999.0,
+        "periodic_checkpoint_every_steps": 0,
+        "high_watermark_checkpoint_enabled": False,
         "high_watermark_sharpe_threshold": 0.5,
-        # Optional per-step snapshots (very noisy; disabled by default).
         "step_sharpe_checkpoint_enabled": False,
         "step_sharpe_checkpoint_threshold": 0.5,
 
@@ -836,24 +842,29 @@ PHASE2_CONFIG = {
         # Console logging cadence
         "episode_log_interval": 10,
 
-        # Rare checkpoint capture (high-performance snapshots)
+        # Checkpointing default: periodic deterministic validation is the primary selector.
+        "deterministic_validation_checkpointing_enabled": True,
+        "deterministic_validation_eval_every_episodes": 5,
+        "deterministic_validation_mode": "mean",
+        "deterministic_validation_episode_length_limit": None,
+        "deterministic_validation_sharpe_min": 0.5,
+        "deterministic_validation_sharpe_min_delta": 0.0,
+        "deterministic_validation_seed_offset": 10_000,
+        "deterministic_validation_checkpointing_only": True,
+
+        # Legacy checkpoint routes (disabled by default).
         "rare_checkpoint_params": {
-            "enable": True,
+            "enable": False,
             "min_sharpe": 1.5,
             "min_sortino": 2.0,
             "max_mdd": 0.15,          # 15% drawdown
             "max_turnover": 0.80,     # 80% daily turnover
             "top_n": 5
         },
-        # TAPE checkpoint trigger uses clipped terminal-bonus scale.
-        # With signed mode + baseline 0.20 + scalar 10, 4.0 ~= tape_score >= 0.52.
-        "tape_checkpoint_threshold": 4.0,
-        # Periodic safety snapshots independent of TAPE threshold.
-        "periodic_checkpoint_every_steps": 10_000,
-        # Episode-level high-watermark snapshots (save on new best Sharpe >= threshold).
-        "high_watermark_checkpoint_enabled": True,
+        "tape_checkpoint_threshold": 999.0,
+        "periodic_checkpoint_every_steps": 0,
+        "high_watermark_checkpoint_enabled": False,
         "high_watermark_sharpe_threshold": 0.5,
-        # Optional per-step snapshots (very noisy; disabled by default).
         "step_sharpe_checkpoint_enabled": False,
         "step_sharpe_checkpoint_threshold": 0.5,
         

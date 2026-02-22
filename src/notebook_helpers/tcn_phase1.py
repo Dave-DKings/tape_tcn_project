@@ -2611,13 +2611,151 @@ def run_experiment6_tape(
             }
         )
 
-    high_watermark_checkpoint_enabled_cfg = bool(training_params.get("high_watermark_checkpoint_enabled", True))
+    deterministic_validation_checkpointing_enabled_cfg = bool(
+        training_params.get("deterministic_validation_checkpointing_enabled", True)
+    )
+    deterministic_validation_checkpointing_only_cfg = bool(
+        training_params.get("deterministic_validation_checkpointing_only", True)
+    )
+    deterministic_validation_eval_every_episodes_cfg = max(
+        1, int(training_params.get("deterministic_validation_eval_every_episodes", 5))
+    )
+    deterministic_validation_mode_cfg = str(
+        training_params.get("deterministic_validation_mode", "mean")
+    ).strip().lower()
+    if deterministic_validation_mode_cfg not in {"mean", "mode", "sample", "mean_plus_noise"}:
+        deterministic_validation_mode_cfg = "mean"
+    deterministic_validation_episode_length_limit_cfg = training_params.get(
+        "deterministic_validation_episode_length_limit", None
+    )
+    if deterministic_validation_episode_length_limit_cfg is not None:
+        deterministic_validation_episode_length_limit_cfg = max(
+            1, int(deterministic_validation_episode_length_limit_cfg)
+        )
+    deterministic_validation_sharpe_min_cfg = float(
+        training_params.get("deterministic_validation_sharpe_min", 0.5)
+    )
+    deterministic_validation_sharpe_min_delta_cfg = float(
+        training_params.get("deterministic_validation_sharpe_min_delta", 0.0)
+    )
+    deterministic_validation_seed_offset_cfg = int(
+        training_params.get("deterministic_validation_seed_offset", 10_000)
+    )
+
+    # Legacy routes disabled by default; deterministic validation is now primary selector.
+    high_watermark_checkpoint_enabled_cfg = bool(training_params.get("high_watermark_checkpoint_enabled", False))
     high_watermark_sharpe_threshold_cfg = float(training_params.get("high_watermark_sharpe_threshold", 0.5))
-    if high_watermark_sharpe_threshold_cfg < 0.5:
-        high_watermark_sharpe_threshold_cfg = 0.5
-    # Evaluation-focused checkpoint policy: disable step-sharpe saves.
-    step_sharpe_checkpoint_enabled_cfg = False
+    step_sharpe_checkpoint_enabled_cfg = bool(training_params.get("step_sharpe_checkpoint_enabled", False))
     step_sharpe_checkpoint_threshold_cfg = float(training_params.get("step_sharpe_checkpoint_threshold", 0.5))
+    periodic_checkpoint_every_steps_cfg = int(training_params.get("periodic_checkpoint_every_steps", 0) or 0)
+    tape_checkpoint_threshold_cfg = float(training_params.get("tape_checkpoint_threshold", 999.0))
+    if deterministic_validation_checkpointing_only_cfg:
+        high_watermark_checkpoint_enabled_cfg = False
+        step_sharpe_checkpoint_enabled_cfg = False
+        periodic_checkpoint_every_steps_cfg = 0
+        tape_checkpoint_threshold_cfg = 999.0
+
+    deterministic_validation_best_sharpe = -np.inf
+    deterministic_validation_best_episode: Optional[int] = None
+    deterministic_validation_best_path: Optional[str] = None
+    deterministic_validation_last_metrics: Dict[str, float] = {}
+
+    def run_deterministic_validation_metrics(episode_idx: int) -> Dict[str, float]:
+        """Run deterministic policy on validation env and return episode metrics."""
+        env_eval = env_test_deterministic
+        state_history_backup = None
+        latest_sequence_backup = None
+        if getattr(agent, "state_history", None) is not None:
+            state_history_backup = [np.array(x, copy=True) for x in list(agent.state_history)]
+        if hasattr(agent, "_latest_sequence"):
+            latest_sequence_backup = (
+                np.array(agent._latest_sequence, copy=True)
+                if isinstance(agent._latest_sequence, np.ndarray)
+                else agent._latest_sequence
+            )
+
+        prev_eval_limit = getattr(env_eval, "episode_length_limit", None)
+        try:
+            agent.reset_state_history()
+            if deterministic_validation_episode_length_limit_cfg is not None:
+                env_eval.set_episode_length_limit(deterministic_validation_episode_length_limit_cfg)
+            obs_eval, _ = env_eval.reset(seed=experiment_seed + deterministic_validation_seed_offset_cfg + int(episode_idx))
+            done_eval = False
+            truncated_eval = False
+            while not (done_eval or truncated_eval):
+                action_eval, _, _ = agent.get_action_and_value(
+                    obs_eval,
+                    deterministic=True,
+                    evaluation_mode=deterministic_validation_mode_cfg,
+                )
+                obs_eval, _, done_eval, truncated_eval, _ = env_eval.step(action_eval)
+            metrics_eval = compute_episode_metrics(env_eval)
+            return metrics_eval
+        finally:
+            if deterministic_validation_episode_length_limit_cfg is not None:
+                env_eval.set_episode_length_limit(prev_eval_limit)
+            agent.reset_state_history()
+            if state_history_backup is not None and getattr(agent, "state_history", None) is not None:
+                agent.state_history.clear()
+                for row in state_history_backup:
+                    agent.state_history.append(row)
+            if hasattr(agent, "_latest_sequence"):
+                agent._latest_sequence = latest_sequence_backup
+
+    def maybe_save_deterministic_validation_checkpoint(
+        episode_idx: int,
+    ) -> None:
+        nonlocal deterministic_validation_best_sharpe
+        nonlocal deterministic_validation_best_episode
+        nonlocal deterministic_validation_best_path
+        nonlocal deterministic_validation_last_metrics
+
+        if not deterministic_validation_checkpointing_enabled_cfg:
+            return
+        if episode_idx % deterministic_validation_eval_every_episodes_cfg != 0:
+            return
+
+        val_metrics = run_deterministic_validation_metrics(episode_idx)
+        deterministic_validation_last_metrics = val_metrics
+        val_sharpe = float(to_scalar(val_metrics.get("sharpe_ratio", np.nan)) or np.nan)
+        val_mdd = float(to_scalar(val_metrics.get("max_drawdown_abs", np.nan)) or np.nan)
+        val_ret = float(to_scalar(val_metrics.get("total_return", np.nan)) or np.nan)
+        print(
+            "      🧪 Deterministic validation: "
+            f"Sharpe={val_sharpe:.3f} | Return={val_ret*100.0:+.2f}% | DD={val_mdd*100.0:.2f}%"
+        )
+        if not np.isfinite(val_sharpe):
+            return
+        if val_sharpe < deterministic_validation_sharpe_min_cfg:
+            return
+        if val_sharpe <= (deterministic_validation_best_sharpe + deterministic_validation_sharpe_min_delta_cfg):
+            return
+
+        high_watermark_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        sharpe_tag = _format_checkpoint_metric_tag(val_sharpe)
+        prefix = high_watermark_checkpoint_dir / (
+            f"exp{exp_idx}_tape_hw_ep{episode_idx:05d}_sh{sharpe_tag}"
+        )
+        agent.save_models(str(prefix))
+        print(
+            "      💾 Deterministic-validation checkpoint saved: "
+            f"{prefix}_actor.weights.h5 (val_sharpe={val_sharpe:.3f})"
+        )
+        deterministic_validation_best_sharpe = val_sharpe
+        deterministic_validation_best_episode = int(episode_idx)
+        deterministic_validation_best_path = str(prefix)
+        saved_checkpoint_records.append(
+            {
+                "type": "deterministic_validation_high_watermark",
+                "episode": int(episode_idx),
+                "step": int(step) if "step" in locals() else None,
+                "sharpe": float(val_sharpe),
+                "validation_return": float(val_ret) if np.isfinite(val_ret) else None,
+                "validation_max_drawdown_abs": float(val_mdd) if np.isfinite(val_mdd) else None,
+                "actor_path": f"{prefix}_actor.weights.h5",
+                "critic_path": f"{prefix}_critic.weights.h5",
+            }
+        )
 
     print(f"\n🎯 Starting THREE-COMPONENT TAPE v3 training (with curriculum)...")
     print(f"   Total timesteps: {max_total_timesteps:,}")
@@ -2651,14 +2789,30 @@ def run_experiment6_tape(
     print(f"   🎛️ Action Execution Beta Curriculum:")
     for threshold, beta_value in sorted(action_execution_beta_curriculum.items(), key=lambda item: item[0]):
         print(f"      {threshold:,}+ steps: beta={beta_value:.2f}")
-    if high_watermark_checkpoint_enabled_cfg:
+    if deterministic_validation_checkpointing_enabled_cfg:
+        val_limit_label = (
+            "full"
+            if deterministic_validation_episode_length_limit_cfg is None
+            else str(deterministic_validation_episode_length_limit_cfg)
+        )
         print(
-            "   🏆 High-Watermark checkpoints: "
-            f"enabled (save every episode with Sharpe >= {high_watermark_sharpe_threshold_cfg:.2f})"
+            "   🏆 Deterministic-validation checkpoints: "
+            f"enabled (every {deterministic_validation_eval_every_episodes_cfg} episodes | "
+            f"mode={deterministic_validation_mode_cfg} | "
+            f"min_sharpe={deterministic_validation_sharpe_min_cfg:.2f} | "
+            f"min_delta={deterministic_validation_sharpe_min_delta_cfg:.3f} | "
+            f"horizon={val_limit_label})"
         )
     else:
-        print("   🏆 High-Watermark checkpoints: disabled")
-    print("   🧷 Step-Sharpe checkpoints: disabled")
+        print("   🏆 Deterministic-validation checkpoints: disabled")
+    if deterministic_validation_checkpointing_only_cfg:
+        print("   🧷 Legacy checkpoint routes: disabled (high-watermark/step/periodic/tape/rare)")
+    else:
+        print("   🧷 Legacy checkpoint routes: configurable")
+    if deterministic_validation_checkpointing_enabled_cfg:
+        print("   ✅ Checkpoint selector default: deterministic validation Sharpe improvement")
+    else:
+        print("   ⚠️ Checkpoint selector default: legacy high-watermark path")
 
     metadata_path = log_dir / f"{training_log_prefix}_metadata.json"
     feature_manifest_path = log_dir / f"{training_log_prefix}_active_feature_manifest.json"
@@ -2680,16 +2834,24 @@ def run_experiment6_tape(
     actuarial_columns = sorted([col for col in phase1_data.master_df.columns if "Actuarial_" in col])
     checkpoint_strategy = {
         "normal_checkpoint_naming": "exp{exp_idx}_tape_hw_ep{episode:05d}_sh{tag}",
-        "normal_checkpoint_selection": "latest_episode",
+        "normal_checkpoint_selection": "best_deterministic_validation_sharpe",
         "rare_checkpoint_selection": "disabled",
         "legacy_final_alias_supported": True,
+        "deterministic_validation_checkpointing_enabled": bool(deterministic_validation_checkpointing_enabled_cfg),
+        "deterministic_validation_checkpointing_only": bool(deterministic_validation_checkpointing_only_cfg),
+        "deterministic_validation_eval_every_episodes": int(deterministic_validation_eval_every_episodes_cfg),
+        "deterministic_validation_mode": deterministic_validation_mode_cfg,
+        "deterministic_validation_episode_length_limit": deterministic_validation_episode_length_limit_cfg,
+        "deterministic_validation_sharpe_min": float(deterministic_validation_sharpe_min_cfg),
+        "deterministic_validation_sharpe_min_delta": float(deterministic_validation_sharpe_min_delta_cfg),
+        "deterministic_validation_seed_offset": int(deterministic_validation_seed_offset_cfg),
         "tape_checkpoint_threshold_bonus": None,
-        "periodic_checkpoint_every_steps": 0,
+        "periodic_checkpoint_every_steps": int(periodic_checkpoint_every_steps_cfg),
         "high_watermark_checkpoint_enabled": bool(high_watermark_checkpoint_enabled_cfg),
         "high_watermark_sharpe_threshold": float(high_watermark_sharpe_threshold_cfg),
         "high_watermark_checkpoint_subdir": "high_watermark_checkpoints",
-        "high_watermark_logic": "save_on_every_episode_sharpe_threshold",
-        "step_sharpe_checkpoint_enabled": False,
+        "high_watermark_logic": "save_on_deterministic_validation_sharpe_improvement",
+        "step_sharpe_checkpoint_enabled": bool(step_sharpe_checkpoint_enabled_cfg),
         "step_sharpe_checkpoint_threshold": float(step_sharpe_checkpoint_threshold_cfg),
         "step_sharpe_checkpoint_subdir": "step_sharpe_checkpoints",
         "saved_checkpoints_for_this_run": [],
@@ -2819,9 +2981,9 @@ def run_experiment6_tape(
     training_episode_count = 0
     step = 0
     done = False
-    save_tape_bonus_checkpoints = False
-    tape_threshold = float(training_params.get("tape_checkpoint_threshold", 4.0))
-    periodic_checkpoint_every_steps = 0
+    save_tape_bonus_checkpoints = not deterministic_validation_checkpointing_only_cfg
+    tape_threshold = float(tape_checkpoint_threshold_cfg)
+    periodic_checkpoint_every_steps = int(periodic_checkpoint_every_steps_cfg)
     high_watermark_checkpoint_enabled = bool(high_watermark_checkpoint_enabled_cfg)
     high_watermark_sharpe_threshold = float(high_watermark_sharpe_threshold_cfg)
     high_watermark_checkpoint_dir = results_root / "high_watermark_checkpoints"
@@ -3102,7 +3264,10 @@ def run_experiment6_tape(
                         elif not did_clip:
                             last_tape_bonus_clipped = False
 
-                maybe_save_high_watermark_checkpoint(training_episode_count, metrics_current)
+                if deterministic_validation_checkpointing_enabled_cfg:
+                    maybe_save_deterministic_validation_checkpoint(training_episode_count)
+                else:
+                    maybe_save_high_watermark_checkpoint(training_episode_count, metrics_current)
                 obs, info = env_train.reset()
                 done = False
 
@@ -3519,6 +3684,23 @@ def run_experiment6_tape(
         }
     )
 
+    selected_checkpoint_prefix_path = (
+        Path(deterministic_validation_best_path)
+        if deterministic_validation_best_path
+        else checkpoint_prefix_path
+    )
+    if deterministic_validation_best_path:
+        print(
+            "🎯 Default selected checkpoint (best deterministic validation): "
+            f"{selected_checkpoint_prefix_path}"
+        )
+        print(
+            "   ↳ Selection basis: deterministic validation Sharpe "
+            f"{deterministic_validation_best_sharpe:.3f} at episode {deterministic_validation_best_episode}"
+        )
+    else:
+        print("🎯 Default selected checkpoint: final high-watermark-style checkpoint")
+
     try:
         with open(metadata_path, "r", encoding="utf-8") as f:
             metadata_latest = json.load(f)
@@ -3532,14 +3714,41 @@ def run_experiment6_tape(
                 continue
             seen_actor_paths.add(actor_path)
             unique_records.append(rec)
+        if deterministic_validation_best_episode is not None and np.isfinite(deterministic_validation_best_sharpe):
+            checkpoint_description = (
+                f"Best deterministic-validation checkpoint episode {deterministic_validation_best_episode} "
+                f"(Val Sharpe={deterministic_validation_best_sharpe:.3f}); "
+                f"final checkpoint episode {training_episode_count} (Train Sharpe={final_sharpe:.3f})"
+            )
+        else:
+            checkpoint_description = (
+                f"Final high-watermark-style checkpoint episode {training_episode_count} "
+                f"(Sharpe={final_sharpe:.3f})"
+            )
+
         metadata_latest["Checkpointing"].update(
             {
-                "checkpoint_description": (
-                    f"Final high-watermark-style checkpoint episode {training_episode_count} "
-                    f"(Sharpe={final_sharpe:.3f})"
-                ),
+                "checkpoint_description": checkpoint_description,
                 "final_actor_weights_path": f"{checkpoint_prefix_path}_actor.weights.h5",
                 "final_critic_weights_path": f"{checkpoint_prefix_path}_critic.weights.h5",
+                "deterministic_validation_best_episode": (
+                    int(deterministic_validation_best_episode)
+                    if deterministic_validation_best_episode is not None
+                    else None
+                ),
+                "deterministic_validation_best_sharpe": (
+                    float(deterministic_validation_best_sharpe)
+                    if np.isfinite(deterministic_validation_best_sharpe)
+                    else None
+                ),
+                "deterministic_validation_best_checkpoint_prefix": deterministic_validation_best_path,
+                "selected_checkpoint_prefix": str(selected_checkpoint_prefix_path),
+                "selected_checkpoint_source": (
+                    "deterministic_validation_best"
+                    if deterministic_validation_best_path is not None
+                    else "final_high_watermark_style"
+                ),
+                "deterministic_validation_last_metrics": _json_ready(deterministic_validation_last_metrics),
                 "saved_checkpoints_for_this_run": unique_records,
                 "saved_checkpoints_count": int(len(unique_records)),
             }
@@ -3566,7 +3775,7 @@ def run_experiment6_tape(
         training_episodes_path=str(training_episodes_path),
         training_custom_path=str(training_custom_path),
         training_rows=df_training_rows,
-        checkpoint_path=str(checkpoint_prefix_path),
+        checkpoint_path=str(selected_checkpoint_prefix_path),
         total_timesteps=step,
         total_episodes=training_episode_count,
         training_duration=train_duration,
@@ -5025,7 +5234,18 @@ def load_run_checkpoint_prefixes_from_metadata(
         return []
 
     allowed = {str(t) for t in allowed_types} if allowed_types is not None else None
+    # Backward-compatible aliasing: deterministic validation checkpoints are high-watermark-style.
+    allowed_aliases = {
+        "high_watermark": {"high_watermark", "deterministic_validation_high_watermark"},
+        "deterministic_validation_high_watermark": {"deterministic_validation_high_watermark", "high_watermark"},
+    }
     root = Path(results_root) if results_root is not None else None
+
+    expanded_allowed: Optional[set] = None
+    if allowed is not None:
+        expanded_allowed = set()
+        for token in allowed:
+            expanded_allowed.update(allowed_aliases.get(token, {token}))
 
     def _remap_to_root(path_obj: Path, root_dir: Path) -> Path:
         if path_obj.exists():
@@ -5047,8 +5267,8 @@ def load_run_checkpoint_prefixes_from_metadata(
         if not isinstance(rec, dict):
             continue
         rec_type = str(rec.get("type", ""))
-        if allowed is not None and rec_type not in allowed:
-            continue
+        if expanded_allowed is not None and rec_type not in expanded_allowed:
+                continue
         actor_path = rec.get("actor_path")
         critic_path = rec.get("critic_path")
         if not actor_path or not critic_path:
