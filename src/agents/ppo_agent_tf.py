@@ -32,6 +32,16 @@ logger = logging.getLogger(__name__)
 tfd = tfp.distributions
 
 
+def _to_tensor_with_cast(value, dtype=None):
+    """Convert to tensor and cast dtype explicitly (safe with mixed precision tensors)."""
+    tensor = tf.convert_to_tensor(value)
+    if dtype is not None:
+        target_dtype = tf.dtypes.as_dtype(dtype)
+        if tensor.dtype != target_dtype:
+            tensor = tf.cast(tensor, target_dtype)
+    return tensor
+
+
 class RunningMeanStd:
     """Track running mean and variance for streaming normalization."""
 
@@ -317,14 +327,14 @@ class PPOAgentTF:
             context = state.get("context")
             if asset is None:
                 raise ValueError("Structured state dict must contain key 'asset'.")
-            asset = tf.convert_to_tensor(asset, dtype=tf.float32)
-            context = tf.convert_to_tensor(context, dtype=tf.float32) if context is not None else None
+            asset = _to_tensor_with_cast(asset, tf.float32)
+            context = _to_tensor_with_cast(context, tf.float32) if context is not None else None
         else:
             if isinstance(state, tf.Tensor):
                 state = state.numpy()
             asset_np, context_np = self._split_flat_state_array(state)
-            asset = tf.convert_to_tensor(asset_np, dtype=tf.float32)
-            context = tf.convert_to_tensor(context_np, dtype=tf.float32)
+            asset = _to_tensor_with_cast(asset_np, tf.float32)
+            context = _to_tensor_with_cast(context_np, tf.float32)
 
         return {"asset": asset, "context": context}
 
@@ -773,7 +783,7 @@ class PPOAgentTF:
         if asset is None:
             return None
 
-        asset = tf.convert_to_tensor(asset, dtype=tf.float32)
+        asset = _to_tensor_with_cast(asset, tf.float32)
         if asset.shape.rank != 4:
             return None
         if asset.shape[-1] == 0:
@@ -796,7 +806,7 @@ class PPOAgentTF:
             target_risky_weights: (num_assets,)
             target_cash_weight: scalar
         """
-        asset_returns = tf.convert_to_tensor(asset_returns, dtype=tf.float32)
+        asset_returns = _to_tensor_with_cast(asset_returns, tf.float32)
         n_obs = tf.cast(tf.shape(asset_returns)[0], tf.float32)
         n_assets = tf.shape(asset_returns)[1]
 
@@ -839,7 +849,7 @@ class PPOAgentTF:
         if asset_returns is None:
             return zero, zero, zero, zero
 
-        alpha = tf.convert_to_tensor(alpha, dtype=tf.float32)
+        alpha = _to_tensor_with_cast(alpha, tf.float32)
         weights = alpha / tf.maximum(tf.reduce_sum(alpha, axis=-1, keepdims=True), 1e-8)
         risky_weights = weights[:, :self.num_assets]
         cash_weights = weights[:, self.num_assets]
@@ -953,11 +963,11 @@ class PPOAgentTF:
         values = self.critic(states, training=True)
         values = tf.squeeze(values, -1)  # Remove last dimension
 
-        returns_mean = tf.convert_to_tensor(returns_mean, dtype=tf.float32)
-        returns_std = tf.convert_to_tensor(returns_std, dtype=tf.float32)
+        returns_mean = _to_tensor_with_cast(returns_mean, tf.float32)
+        returns_std = _to_tensor_with_cast(returns_std, tf.float32)
         returns_std = tf.maximum(returns_std, 1e-6)
 
-        returns = tf.convert_to_tensor(returns, dtype=tf.float32)
+        returns = _to_tensor_with_cast(returns, tf.float32)
         returns_centered = returns - returns_mean
         returns_norm = returns_centered / returns_std
 
@@ -970,7 +980,7 @@ class PPOAgentTF:
             and self.value_clip_range > 0.0
             and old_values is not None
         ):
-            old_values = tf.convert_to_tensor(old_values, dtype=tf.float32)
+            old_values = _to_tensor_with_cast(old_values, tf.float32)
             old_values = tf.reshape(old_values, tf.shape(values))
             values_clipped = old_values + tf.clip_by_value(
                 values - old_values,

@@ -34,6 +34,16 @@ _DEFAULT_ALPHA_ACTIVATION = _DEFAULT_AGENT_PARAMS.get('dirichlet_alpha_activatio
 _DEFAULT_EXP_CLIP = tuple(_DEFAULT_AGENT_PARAMS.get('dirichlet_exp_clip', (-5.0, 3.0)))
 
 
+def _to_tensor_with_cast(value: Any, dtype: Optional[tf.dtypes.DType] = None) -> tf.Tensor:
+    """Convert to tensor and cast dtype explicitly (safe with mixed precision tensors)."""
+    tensor = tf.convert_to_tensor(value)
+    if dtype is not None:
+        target_dtype = tf.dtypes.as_dtype(dtype)
+        if tensor.dtype != target_dtype:
+            tensor = tf.cast(tensor, target_dtype)
+    return tensor
+
+
 # ============================================================================
 # ATTENTION MECHANISM
 # ============================================================================
@@ -224,13 +234,13 @@ def _flatten_structured_sequence_input(state: Any) -> tf.Tensor:
     and return a flat sequence tensor (batch, timesteps, features).
     """
     if not isinstance(state, dict):
-        return tf.convert_to_tensor(state, dtype=tf.float32)
+        return _to_tensor_with_cast(state, tf.float32)
 
     asset = state.get("asset")
     if asset is None:
         raise ValueError("Structured state must include key 'asset'.")
 
-    asset = tf.convert_to_tensor(asset, dtype=tf.float32)
+    asset = _to_tensor_with_cast(asset, tf.float32)
     if asset.shape.rank == 3:
         asset = tf.expand_dims(asset, axis=0)
     if asset.shape.rank != 4:
@@ -246,7 +256,7 @@ def _flatten_structured_sequence_input(state: Any) -> tf.Tensor:
     if context is None:
         return asset_flat
 
-    context = tf.convert_to_tensor(context, dtype=asset_flat.dtype)
+    context = _to_tensor_with_cast(context, asset_flat.dtype)
     if context.shape.rank == 1:
         context = tf.expand_dims(tf.expand_dims(context, axis=0), axis=0)
     elif context.shape.rank == 2:
@@ -718,7 +728,7 @@ class TCNFusionActor(DirichletActor):
 
     def _align_asset_tensor(self, asset_tensor: tf.Tensor) -> tf.Tensor:
         """Pad/slice asset and feature axes to deterministic fusion dimensions."""
-        x_assets = tf.convert_to_tensor(asset_tensor, dtype=tf.float32)
+        x_assets = _to_tensor_with_cast(asset_tensor, tf.float32)
         if x_assets.shape.rank != 4:
             raise ValueError(
                 f"TCNFusionActor expects asset tensor rank=4 (batch,time,assets,features), got shape {x_assets.shape}"
@@ -749,7 +759,7 @@ class TCNFusionActor(DirichletActor):
         if context_tensor is None:
             return tf.zeros((batch, timesteps, target_dim), dtype=fallback.dtype)
 
-        context = tf.convert_to_tensor(context_tensor, dtype=fallback.dtype)
+        context = _to_tensor_with_cast(context_tensor, fallback.dtype)
         if context.shape.rank == 2:
             context = tf.expand_dims(context, axis=1)
         elif context.shape.rank != 3:
@@ -1080,7 +1090,7 @@ class TCNFusionCritic(Model):
         return x[:, :, : self.expected_input_dim]
 
     def _align_asset_tensor(self, asset_tensor: tf.Tensor) -> tf.Tensor:
-        x_assets = tf.convert_to_tensor(asset_tensor, dtype=tf.float32)
+        x_assets = _to_tensor_with_cast(asset_tensor, tf.float32)
         if x_assets.shape.rank != 4:
             raise ValueError(
                 f"TCNFusionCritic expects asset tensor rank=4 (batch,time,assets,features), got shape {x_assets.shape}"
@@ -1109,7 +1119,7 @@ class TCNFusionCritic(Model):
         if context_tensor is None:
             return tf.zeros((batch, timesteps, target_dim), dtype=fallback.dtype)
 
-        context = tf.convert_to_tensor(context_tensor, dtype=fallback.dtype)
+        context = _to_tensor_with_cast(context_tensor, fallback.dtype)
         if context.shape.rank == 2:
             context = tf.expand_dims(context, axis=1)
         elif context.shape.rank != 3:
