@@ -498,12 +498,13 @@ class PPOAgentTF:
         
         # Get alpha parameters from actor
         alpha = self.actor(state_input, training=False)
+        alpha = _to_tensor_with_cast(alpha, tf.float32)
         
         # 🔥 CRITICAL FIX: Ensure alpha > 0 for Dirichlet distribution
         # This must happen in BOTH get_action_and_value() and _actor_loss()
         # because get_action_and_value() is called during rollout collection
         # BEFORE any loss calculation occurs
-        alpha = tf.maximum(alpha, 1e-6)
+        alpha = tf.maximum(alpha, tf.constant(1e-6, dtype=alpha.dtype))
         
         # Create Dirichlet distribution
         dirichlet = tfd.Dirichlet(alpha)
@@ -530,12 +531,16 @@ class PPOAgentTF:
                 
                 # Formula for alpha > 1
                 sum_alpha = tf.reduce_sum(alpha, axis=-1, keepdims=True)
-                k = tf.cast(tf.shape(alpha)[-1], tf.float32)
+                k = tf.cast(tf.shape(alpha)[-1], alpha.dtype)
                 mode_formula = (alpha - 1.0) / (sum_alpha - k)
                 
                 # Vertex for alpha <= 1 (argmax)
                 max_indices = tf.argmax(alpha, axis=-1)
-                mode_vertex = tf.one_hot(max_indices, depth=tf.shape(alpha)[-1])
+                mode_vertex = tf.one_hot(
+                    max_indices,
+                    depth=tf.shape(alpha)[-1],
+                    dtype=alpha.dtype,
+                )
                 
                 # Select based on validity
                 action = tf.where(use_formula, mode_formula, mode_vertex)
@@ -563,6 +568,7 @@ class PPOAgentTF:
         
         # Get value estimate
         value = self.critic(state_input, training=False)
+        value = _to_tensor_with_cast(value, tf.float32)
         
         # Squeeze batch dimension if needed
         if needs_squeeze:
@@ -890,10 +896,11 @@ class PPOAgentTF:
         """
         # Get current policy distribution
         alpha = self.actor(states, training=True)
+        alpha = _to_tensor_with_cast(alpha, tf.float32)
         
         # CRITICAL FIX: Ensure alpha > 0 for Dirichlet distribution
         # Dirichlet requires strictly positive parameters
-        alpha = tf.maximum(alpha, 1e-6)
+        alpha = tf.maximum(alpha, tf.constant(1e-6, dtype=alpha.dtype))
         
         dirichlet = tfd.Dirichlet(alpha)
         
@@ -961,6 +968,7 @@ class PPOAgentTF:
             critic_loss: MSE loss between predicted and target values
         """
         values = self.critic(states, training=True)
+        values = _to_tensor_with_cast(values, tf.float32)
         values = tf.squeeze(values, -1)  # Remove last dimension
 
         returns_mean = _to_tensor_with_cast(returns_mean, tf.float32)

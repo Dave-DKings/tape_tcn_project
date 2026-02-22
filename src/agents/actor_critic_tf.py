@@ -107,7 +107,8 @@ class MultiHeadSelfAttention(layers.Layer):
         matmul_qk = tf.matmul(q, k, transpose_b=True)  # (batch, num_heads, seq_len, seq_len)
         
         # Scale
-        dk = tf.cast(tf.shape(k)[-1], tf.float32)
+        # Keep scale dtype aligned with attention logits for mixed precision safety.
+        dk = tf.cast(tf.shape(k)[-1], matmul_qk.dtype)
         scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
         
         # Softmax
@@ -353,7 +354,8 @@ class DirichletActor(Model):
         Apply the selected activation to produce Dirichlet concentration parameters.
         Includes temperature scaling and optional capping.
         """
-        eps = self.epsilon_value()
+        logits = tf.convert_to_tensor(logits)
+        eps = tf.cast(self.epsilon_value(), logits.dtype)
         activation = self._alpha_activation
         
         # 1. Apply Temperature Scaling (flatten logits before activation)
@@ -383,10 +385,11 @@ class DirichletActor(Model):
 
         # 3. Apply Alpha Cap (Safety Ceiling)
         if self._alpha_cap is not None:
-            alpha = tf.minimum(alpha, self._alpha_cap)
+            alpha_cap = tf.cast(self._alpha_cap, alpha.dtype)
+            alpha = tf.minimum(alpha, alpha_cap)
 
         # Ensure strictly positive
-        return tf.maximum(alpha, 1e-6)
+        return tf.maximum(alpha, tf.cast(1e-6, alpha.dtype))
 
 
 class TCNActor(DirichletActor):

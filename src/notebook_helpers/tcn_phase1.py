@@ -4105,7 +4105,8 @@ def evaluate_experiment6_checkpoint(
         
         # Single actor forward pass to get alpha values
         alpha_raw = agent_eval.actor(state_input, training=False)
-        alpha = tf.maximum(alpha_raw, 1e-6)  # Ensure alpha > 0
+        alpha = tf.cast(alpha_raw, tf.float32)
+        alpha = tf.maximum(alpha, tf.constant(1e-6, dtype=alpha.dtype))  # Ensure alpha > 0
         alpha_values = alpha.numpy()[0] if needs_squeeze else alpha.numpy()  # Store for return
         
         # Create Dirichlet distribution from alpha
@@ -4134,11 +4135,15 @@ def evaluate_experiment6_checkpoint(
             use_formula = min_alpha > 1.0
             
             sum_alpha = tf.reduce_sum(alpha, axis=-1, keepdims=True)
-            k = tf.cast(tf.shape(alpha)[-1], tf.float32)
+            k = tf.cast(tf.shape(alpha)[-1], alpha.dtype)
             mode_formula = (alpha - 1.0) / (sum_alpha - k)
             
             max_indices = tf.argmax(alpha, axis=-1)
-            mode_vertex = tf.one_hot(max_indices, depth=tf.shape(alpha)[-1])
+            mode_vertex = tf.one_hot(
+                max_indices,
+                depth=tf.shape(alpha)[-1],
+                dtype=alpha.dtype,
+            )
             
             action = tf.where(use_formula, mode_formula, mode_vertex)
         
@@ -4146,7 +4151,7 @@ def evaluate_experiment6_checkpoint(
         log_prob = dirichlet.log_prob(action)
         
         # Get value estimate
-        value = agent_eval.critic(state_input, training=False)
+        value = tf.cast(agent_eval.critic(state_input, training=False), tf.float32)
         
         # Squeeze if needed
         if needs_squeeze:
