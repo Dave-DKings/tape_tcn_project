@@ -543,6 +543,8 @@ def _extract_effective_agent_params(
         "dirichlet_alpha_activation",
         "dirichlet_epsilon",
         "dirichlet_exp_clip",
+        "dirichlet_logit_temperature",
+        "dirichlet_alpha_cap",
         "logit_temperature",
         "alpha_cap",
         "num_assets",
@@ -582,7 +584,17 @@ def _extract_effective_agent_params(
                     effective[key] = agent_config[key]
 
         if resolved_arch == "TCN_FUSION":
-            for key in ["fusion_embed_dim", "fusion_attention_heads", "fusion_dropout"]:
+            for key in [
+                "fusion_embed_dim",
+                "fusion_attention_heads",
+                "fusion_dropout",
+                "fusion_cross_asset_mixer_enabled",
+                "fusion_cross_asset_mixer_layers",
+                "fusion_cross_asset_mixer_expansion",
+                "fusion_cross_asset_mixer_dropout",
+                "fusion_alpha_head_hidden_dims",
+                "fusion_alpha_head_dropout",
+            ]:
                 if key in agent_config:
                     effective[key] = agent_config[key]
 
@@ -997,8 +1009,16 @@ def create_experiment6_result_stub(
             "max": 0.5,
             "min": 0.1,
         },
-        "dirichlet_alpha_activation": base_agent_params.get('dirichlet_alpha_activation', 'elu') if base_agent_params else 'elu',
+        "dirichlet_alpha_activation": base_agent_params.get('dirichlet_alpha_activation', 'softplus') if base_agent_params else 'softplus',
         "dirichlet_exp_clip": (-5.0, 3.0),
+        "dirichlet_logit_temperature": 1.0,
+        "dirichlet_alpha_cap": 100.0,
+        "fusion_cross_asset_mixer_enabled": False,
+        "fusion_cross_asset_mixer_layers": 1,
+        "fusion_cross_asset_mixer_expansion": 2.0,
+        "fusion_cross_asset_mixer_dropout": 0.1,
+        "fusion_alpha_head_hidden_dims": [],
+        "fusion_alpha_head_dropout": 0.1,
         "max_total_timesteps": max_total_timesteps,
     }
 
@@ -1169,6 +1189,7 @@ def load_training_metadata_into_config(
     arch_meta = metadata.get("Architecture_Settings", {}) or {}
     train_meta = metadata.get("Training_Hyperparameters", {}) or {}
     reward_meta = metadata.get("Reward_and_Environment", {}) or {}
+    checkpoint_meta = metadata.get("Checkpointing", {}) or {}
 
     agent_params = config.setdefault("agent_params", {})
     env_params = config.setdefault("environment_params", {})
@@ -1209,6 +1230,10 @@ def load_training_metadata_into_config(
         "ra_kl_max_change_fraction",
         "ra_kl_min_target_kl",
         "ra_kl_max_target_kl",
+        "log_step_diagnostics",
+        "alpha_diversity_log_interval",
+        "alpha_diversity_warning_after_updates",
+        "alpha_diversity_warning_std_threshold",
     ):
         if key in train_meta:
             training_params[key] = copy.deepcopy(train_meta[key])
@@ -1243,6 +1268,25 @@ def load_training_metadata_into_config(
     if isinstance(reward_meta.get("drawdown_constraint"), dict):
         env_params["drawdown_constraint"] = copy.deepcopy(reward_meta["drawdown_constraint"])
 
+    for key in (
+        "deterministic_validation_checkpointing_enabled",
+        "deterministic_validation_checkpointing_only",
+        "deterministic_validation_eval_every_episodes",
+        "deterministic_validation_mode",
+        "deterministic_validation_episode_length_limit",
+        "deterministic_validation_sharpe_min",
+        "deterministic_validation_sharpe_min_delta",
+        "deterministic_validation_seed_offset",
+        "deterministic_validation_log_alpha_stats",
+        "high_watermark_checkpoint_enabled",
+        "high_watermark_sharpe_threshold",
+        "step_sharpe_checkpoint_enabled",
+        "step_sharpe_checkpoint_threshold",
+        "periodic_checkpoint_every_steps",
+    ):
+        if key in checkpoint_meta:
+            training_params[key] = copy.deepcopy(checkpoint_meta[key])
+
     # Keep a profile override so evaluation can align after kernel restart.
     if isinstance(reward_meta.get("tape_profile_full"), dict):
         env_params["tape_profile_override"] = copy.deepcopy(reward_meta["tape_profile_full"])
@@ -1257,6 +1301,40 @@ def load_training_metadata_into_config(
         if run_ctx.get("timestamp"):
             print(f"   Run timestamp: {run_ctx.get('timestamp')}")
         print(f"   Architecture: {agent_params.get('actor_critic_type')}")
+        if all(k in agent_params for k in ("tcn_filters", "tcn_dilations")):
+            print(
+                "   TCN stack: "
+                f"filters={agent_params.get('tcn_filters')} | "
+                f"kernel={agent_params.get('tcn_kernel_size')} | "
+                f"dilations={agent_params.get('tcn_dilations')} | "
+                f"dropout={agent_params.get('tcn_dropout')}"
+            )
+        if str(agent_params.get("actor_critic_type", "")).upper().startswith("TCN_FUSION") or bool(agent_params.get("use_fusion", False)):
+            print(
+                "   Fusion core: "
+                f"embed={agent_params.get('fusion_embed_dim')} | "
+                f"heads={agent_params.get('fusion_attention_heads')} | "
+                f"dropout={agent_params.get('fusion_dropout')}"
+            )
+            print(
+                "   Fusion mixer (A4): "
+                f"enabled={bool(agent_params.get('fusion_cross_asset_mixer_enabled', False))} | "
+                f"layers={agent_params.get('fusion_cross_asset_mixer_layers', 1)} | "
+                f"expansion={agent_params.get('fusion_cross_asset_mixer_expansion', 2.0)} | "
+                f"dropout={agent_params.get('fusion_cross_asset_mixer_dropout', agent_params.get('fusion_dropout'))}"
+            )
+            print(
+                "   Fusion alpha head (A3): "
+                f"dims={agent_params.get('fusion_alpha_head_hidden_dims', [])} | "
+                f"dropout={agent_params.get('fusion_alpha_head_dropout', agent_params.get('fusion_dropout'))}"
+            )
+        print(
+            "   Dirichlet controls: "
+            f"activation={agent_params.get('dirichlet_alpha_activation')} | "
+            f"temperature={agent_params.get('dirichlet_logit_temperature', agent_params.get('logit_temperature', 1.0))} | "
+            f"alpha_cap={agent_params.get('dirichlet_alpha_cap', agent_params.get('alpha_cap', None))} | "
+            f"epsilon={agent_params.get('dirichlet_epsilon')}"
+        )
         print(f"   Turnover target: {env_params.get('target_turnover')}")
         print(f"   DSR scalar: {env_params.get('dsr_scalar')}")
         if training_params.get("timesteps_per_ppo_update_schedule"):
@@ -1265,6 +1343,13 @@ def load_training_metadata_into_config(
             print(f"   PPO update timesteps: {training_params.get('timesteps_per_ppo_update')}")
         print(f"   Episode length curriculum: {training_params.get('use_episode_length_curriculum')}")
         print(f"   RA-KL enabled: {bool(training_params.get('ra_kl_enabled', False))}")
+        if "deterministic_validation_checkpointing_enabled" in training_params:
+            print(
+                "   Deterministic validation checkpointing: "
+                f"{bool(training_params.get('deterministic_validation_checkpointing_enabled'))} "
+                f"(mode={training_params.get('deterministic_validation_mode', 'mean')}, "
+                f"every={training_params.get('deterministic_validation_eval_every_episodes', 5)})"
+            )
         print(f"   Profile override loaded: {'tape_profile_override' in env_params}")
         print(
             f"   Credit assignment mode: "
@@ -2378,6 +2463,39 @@ def run_experiment6_tape(
     print(f"   Actor LR (configured): {agent_config['ppo_params']['actor_lr']}")
     print(f"   Actor LR (active): {agent.get_actor_lr():.6f}")
     print(f"   Critic LR (active): {agent.get_critic_lr():.6f}")
+    print(
+        "   🧱 TCN stack: "
+        f"filters={agent_config.get('tcn_filters')} | "
+        f"kernel={agent_config.get('tcn_kernel_size')} | "
+        f"dilations={agent_config.get('tcn_dilations')} | "
+        f"dropout={agent_config.get('tcn_dropout')}"
+    )
+    if arch_upper == "TCN_FUSION" or bool(agent_config.get("use_fusion", False)):
+        print(
+            "   🧩 Fusion core: "
+            f"embed={agent_config.get('fusion_embed_dim')} | "
+            f"heads={agent_config.get('fusion_attention_heads')} | "
+            f"dropout={agent_config.get('fusion_dropout')}"
+        )
+        print(
+            "   🔀 Cross-Asset Mixer (A4): "
+            f"enabled={bool(agent_config.get('fusion_cross_asset_mixer_enabled', False))} | "
+            f"layers={agent_config.get('fusion_cross_asset_mixer_layers', 1)} | "
+            f"expansion={agent_config.get('fusion_cross_asset_mixer_expansion', 2.0)} | "
+            f"dropout={agent_config.get('fusion_cross_asset_mixer_dropout', agent_config.get('fusion_dropout'))}"
+        )
+        print(
+            "   🎯 Alpha head (A3): "
+            f"dims={agent_config.get('fusion_alpha_head_hidden_dims', [])} | "
+            f"dropout={agent_config.get('fusion_alpha_head_dropout', agent_config.get('fusion_dropout'))}"
+        )
+    print(
+        "   🎛️ Dirichlet controls: "
+        f"activation={agent_config.get('dirichlet_alpha_activation')} | "
+        f"temperature={agent_config.get('dirichlet_logit_temperature', agent_config.get('logit_temperature', 1.0))} | "
+        f"alpha_cap={agent_config.get('dirichlet_alpha_cap', agent_config.get('alpha_cap', None))} | "
+        f"epsilon={agent_config.get('dirichlet_epsilon')}"
+    )
     initial_rollout_len = determine_timesteps_per_update(0)
     initial_batch_size = determine_batch_size_ppo(0, initial_rollout_len)
     print(
@@ -2697,10 +2815,13 @@ def run_experiment6_tape(
         training_params.get("deterministic_validation_sharpe_min", 0.5)
     )
     deterministic_validation_sharpe_min_delta_cfg = float(
-        training_params.get("deterministic_validation_sharpe_min_delta", 0.0)
+        training_params.get("deterministic_validation_sharpe_min_delta", 0.005)
     )
     deterministic_validation_seed_offset_cfg = int(
         training_params.get("deterministic_validation_seed_offset", 10_000)
+    )
+    deterministic_validation_log_alpha_stats_cfg = bool(
+        training_params.get("deterministic_validation_log_alpha_stats", True)
     )
 
     # Legacy routes disabled by default; deterministic validation is now primary selector.
@@ -2726,6 +2847,12 @@ def run_experiment6_tape(
         env_eval = env_test_deterministic
         state_history_backup = None
         latest_sequence_backup = None
+        alpha_mean_series: List[float] = []
+        alpha_std_series: List[float] = []
+        alpha_range_series: List[float] = []
+        alpha_argmax_history: List[int] = []
+        alpha_mode_vertex_steps = 0
+        alpha_diag_error: Optional[str] = None
         if getattr(agent, "state_history", None) is not None:
             state_history_backup = [np.array(x, copy=True) for x in list(agent.state_history)]
         if hasattr(agent, "_latest_sequence"):
@@ -2749,8 +2876,37 @@ def run_experiment6_tape(
                     deterministic=True,
                     evaluation_mode=deterministic_validation_mode_cfg,
                 )
+                if deterministic_validation_log_alpha_stats_cfg:
+                    try:
+                        if getattr(agent, "is_sequential", False) and getattr(agent, "_latest_sequence", None) is not None:
+                            alpha_state_input, _ = agent.prepare_state_input(agent._latest_sequence)
+                        else:
+                            alpha_state_input, _ = agent.prepare_state_input(obs_eval)
+                        alpha_eval = agent.actor(alpha_state_input, training=False)
+                        alpha_eval = tf.convert_to_tensor(alpha_eval, dtype=tf.float32)
+                        alpha_np = np.asarray(alpha_eval.numpy()).reshape(-1)
+                        if alpha_np.size > 0:
+                            alpha_mean_series.append(float(np.mean(alpha_np)))
+                            alpha_std_series.append(float(np.std(alpha_np)))
+                            alpha_range_series.append(float(np.max(alpha_np) - np.min(alpha_np)))
+                            alpha_argmax_history.append(int(np.argmax(alpha_np)))
+                            if deterministic_validation_mode_cfg == "mode" and float(np.min(alpha_np)) <= 1.0:
+                                alpha_mode_vertex_steps += 1
+                    except Exception as exc:
+                        if alpha_diag_error is None:
+                            alpha_diag_error = f"{type(exc).__name__}: {exc}"
                 obs_eval, _, done_eval, truncated_eval, _ = env_eval.step(action_eval)
             metrics_eval = compute_episode_metrics(env_eval)
+            if alpha_mean_series:
+                metrics_eval["validation_alpha_mean"] = float(np.mean(alpha_mean_series))
+                metrics_eval["validation_alpha_std"] = float(np.mean(alpha_std_series))
+                metrics_eval["validation_alpha_spread"] = float(np.mean(alpha_range_series))
+                metrics_eval["validation_alpha_argmax_uniques"] = int(len(set(alpha_argmax_history)))
+                metrics_eval["validation_alpha_mode_vertex_fraction"] = (
+                    float(alpha_mode_vertex_steps) / float(max(1, len(alpha_mean_series)))
+                )
+            if alpha_diag_error is not None:
+                metrics_eval["validation_alpha_diag_error"] = alpha_diag_error
             return metrics_eval
         finally:
             if deterministic_validation_episode_length_limit_cfg is not None:
@@ -2781,10 +2937,28 @@ def run_experiment6_tape(
         val_sharpe = float(to_scalar(val_metrics.get("sharpe_ratio", np.nan)) or np.nan)
         val_mdd = float(to_scalar(val_metrics.get("max_drawdown_abs", np.nan)) or np.nan)
         val_ret = float(to_scalar(val_metrics.get("total_return", np.nan)) or np.nan)
+        val_alpha_spread = float(to_scalar(val_metrics.get("validation_alpha_spread", np.nan)) or np.nan)
+        val_alpha_std = float(to_scalar(val_metrics.get("validation_alpha_std", np.nan)) or np.nan)
+        val_alpha_argmax_uniques = int(to_scalar(val_metrics.get("validation_alpha_argmax_uniques", 0)) or 0)
+        val_mode_vertex_fraction = float(
+            to_scalar(val_metrics.get("validation_alpha_mode_vertex_fraction", np.nan)) or np.nan
+        )
         print(
             "      🧪 Deterministic validation: "
             f"Sharpe={val_sharpe:.3f} | Return={val_ret*100.0:+.2f}% | DD={val_mdd*100.0:.2f}%"
         )
+        if np.isfinite(val_alpha_spread):
+            print(
+                "         Alpha diagnostics: "
+                f"spread={val_alpha_spread:.4f} | std={val_alpha_std:.4f} | "
+                f"argmax_uniques={val_alpha_argmax_uniques}"
+            )
+        if deterministic_validation_mode_cfg == "mode" and np.isfinite(val_mode_vertex_fraction):
+            if val_mode_vertex_fraction > 0.0:
+                print(
+                    "         ⚠️ Mode fallback detected: "
+                    f"alpha<=1 on {val_mode_vertex_fraction*100.0:.1f}% of validation steps."
+                )
         if not np.isfinite(val_sharpe):
             return
         if val_sharpe < deterministic_validation_sharpe_min_cfg:
@@ -2813,6 +2987,12 @@ def run_experiment6_tape(
                 "sharpe": float(val_sharpe),
                 "validation_return": float(val_ret) if np.isfinite(val_ret) else None,
                 "validation_max_drawdown_abs": float(val_mdd) if np.isfinite(val_mdd) else None,
+                "validation_alpha_spread": float(val_alpha_spread) if np.isfinite(val_alpha_spread) else None,
+                "validation_alpha_std": float(val_alpha_std) if np.isfinite(val_alpha_std) else None,
+                "validation_alpha_argmax_uniques": int(val_alpha_argmax_uniques),
+                "validation_alpha_mode_vertex_fraction": (
+                    float(val_mode_vertex_fraction) if np.isfinite(val_mode_vertex_fraction) else None
+                ),
                 "actor_path": f"{prefix}_actor.weights.h5",
                 "critic_path": f"{prefix}_critic.weights.h5",
             }
@@ -2862,6 +3042,7 @@ def run_experiment6_tape(
             f"mode={deterministic_validation_mode_cfg} | "
             f"min_sharpe={deterministic_validation_sharpe_min_cfg:.2f} | "
             f"min_delta={deterministic_validation_sharpe_min_delta_cfg:.3f} | "
+            f"alpha_diag={bool(deterministic_validation_log_alpha_stats_cfg)} | "
             f"horizon={val_limit_label})"
         )
     else:
@@ -2931,6 +3112,7 @@ def run_experiment6_tape(
         "deterministic_validation_sharpe_min": float(deterministic_validation_sharpe_min_cfg),
         "deterministic_validation_sharpe_min_delta": float(deterministic_validation_sharpe_min_delta_cfg),
         "deterministic_validation_seed_offset": int(deterministic_validation_seed_offset_cfg),
+        "deterministic_validation_log_alpha_stats": bool(deterministic_validation_log_alpha_stats_cfg),
         "tape_checkpoint_threshold_bonus": None,
         "periodic_checkpoint_every_steps": int(periodic_checkpoint_every_steps_cfg),
         "high_watermark_checkpoint_enabled": bool(high_watermark_checkpoint_enabled_cfg),
@@ -2993,6 +3175,29 @@ def run_experiment6_tape(
             "dirichlet_alpha_activation": agent_config.get("dirichlet_alpha_activation", "softplus"),
             "dirichlet_epsilon": copy.deepcopy(agent_config.get("dirichlet_epsilon")),
             "dirichlet_exp_clip": copy.deepcopy(agent_config.get("dirichlet_exp_clip")),
+            "dirichlet_logit_temperature": copy.deepcopy(
+                agent_config.get("dirichlet_logit_temperature", agent_config.get("logit_temperature"))
+            ),
+            "dirichlet_alpha_cap": copy.deepcopy(
+                agent_config.get("dirichlet_alpha_cap", agent_config.get("alpha_cap"))
+            ),
+            "tcn_filters": copy.deepcopy(agent_config.get("tcn_filters")),
+            "tcn_kernel_size": copy.deepcopy(agent_config.get("tcn_kernel_size")),
+            "tcn_dilations": copy.deepcopy(agent_config.get("tcn_dilations")),
+            "tcn_dropout": copy.deepcopy(agent_config.get("tcn_dropout")),
+            "fusion_embed_dim": copy.deepcopy(agent_config.get("fusion_embed_dim")),
+            "fusion_attention_heads": copy.deepcopy(agent_config.get("fusion_attention_heads")),
+            "fusion_dropout": copy.deepcopy(agent_config.get("fusion_dropout")),
+            "fusion_cross_asset_mixer_enabled": bool(agent_config.get("fusion_cross_asset_mixer_enabled", False)),
+            "fusion_cross_asset_mixer_layers": copy.deepcopy(agent_config.get("fusion_cross_asset_mixer_layers", 1)),
+            "fusion_cross_asset_mixer_expansion": copy.deepcopy(agent_config.get("fusion_cross_asset_mixer_expansion", 2.0)),
+            "fusion_cross_asset_mixer_dropout": copy.deepcopy(
+                agent_config.get("fusion_cross_asset_mixer_dropout", agent_config.get("fusion_dropout"))
+            ),
+            "fusion_alpha_head_hidden_dims": copy.deepcopy(agent_config.get("fusion_alpha_head_hidden_dims", [])),
+            "fusion_alpha_head_dropout": copy.deepcopy(
+                agent_config.get("fusion_alpha_head_dropout", agent_config.get("fusion_dropout"))
+            ),
             "tcn_hidden_activation": agent_config.get("tcn_activation", "relu"),
             "agent_params_template": template_agent_params,
             "agent_params_effective": effective_agent_params,
@@ -4284,6 +4489,46 @@ def evaluate_experiment6_checkpoint(
                     agent_config_eval["state_layout"] = copy.deepcopy(eval_layout)
         except Exception:
             pass
+
+    print(
+        "   🧭 Checkpoint architecture: "
+        f"{agent_config_eval.get('actor_critic_type')} "
+        f"(attention={bool(agent_config_eval.get('use_attention', False))}, "
+        f"fusion={bool(agent_config_eval.get('use_fusion', False))}, source={arch_hints.get('source')})"
+    )
+    print(
+        "   🧱 Eval TCN stack: "
+        f"filters={agent_config_eval.get('tcn_filters')} | "
+        f"kernel={agent_config_eval.get('tcn_kernel_size')} | "
+        f"dilations={agent_config_eval.get('tcn_dilations')} | "
+        f"dropout={agent_config_eval.get('tcn_dropout')}"
+    )
+    if bool(agent_config_eval.get("use_fusion", False)) or str(agent_config_eval.get("actor_critic_type", "")).upper().endswith("FUSION"):
+        print(
+            "   🧩 Eval fusion core: "
+            f"embed={agent_config_eval.get('fusion_embed_dim')} | "
+            f"heads={agent_config_eval.get('fusion_attention_heads')} | "
+            f"dropout={agent_config_eval.get('fusion_dropout')}"
+        )
+        print(
+            "   🔀 Eval mixer (A4): "
+            f"enabled={bool(agent_config_eval.get('fusion_cross_asset_mixer_enabled', False))} | "
+            f"layers={agent_config_eval.get('fusion_cross_asset_mixer_layers', 1)} | "
+            f"expansion={agent_config_eval.get('fusion_cross_asset_mixer_expansion', 2.0)} | "
+            f"dropout={agent_config_eval.get('fusion_cross_asset_mixer_dropout', agent_config_eval.get('fusion_dropout'))}"
+        )
+        print(
+            "   🎯 Eval alpha head (A3): "
+            f"dims={agent_config_eval.get('fusion_alpha_head_hidden_dims', [])} | "
+            f"dropout={agent_config_eval.get('fusion_alpha_head_dropout', agent_config_eval.get('fusion_dropout'))}"
+        )
+    print(
+        "   🎛️ Eval dirichlet: "
+        f"activation={agent_config_eval.get('dirichlet_alpha_activation')} | "
+        f"temperature={agent_config_eval.get('dirichlet_logit_temperature', agent_config_eval.get('logit_temperature', 1.0))} | "
+        f"alpha_cap={agent_config_eval.get('dirichlet_alpha_cap', agent_config_eval.get('alpha_cap', None))} | "
+        f"epsilon={agent_config_eval.get('dirichlet_epsilon')}"
+    )
 
     agent_eval = PPOAgentTF(
         state_dim=state_dim,

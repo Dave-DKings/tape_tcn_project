@@ -567,10 +567,18 @@ PHASE1_CONFIG = {
         "fusion_embed_dim": 128,
         "fusion_attention_heads": 4,
         "fusion_dropout": 0.1,
+        "fusion_cross_asset_mixer_enabled": False,   # A4 toggle (kept off by default for checkpoint compatibility)
+        "fusion_cross_asset_mixer_layers": 1,
+        "fusion_cross_asset_mixer_expansion": 2.0,
+        "fusion_cross_asset_mixer_dropout": 0.1,
+        "fusion_alpha_head_hidden_dims": [],         # A3 toggle (empty = legacy direct logits head)
+        "fusion_alpha_head_dropout": 0.1,
 
         # Dirichlet alpha activation (controls action concentration)
-        "dirichlet_alpha_activation": "elu",  # Confirmed via literature (strictly positive)
+        "dirichlet_alpha_activation": "softplus",  # Stable strictly-positive alpha map
         "dirichlet_exp_clip": (-5.0, 3.0),
+        "dirichlet_logit_temperature": 1.0,
+        "dirichlet_alpha_cap": 100.0,
 
         # Dirichlet exploration (epsilon annealing)
         "dirichlet_epsilon": {
@@ -859,10 +867,18 @@ PHASE2_CONFIG = {
         "fusion_embed_dim": 128,
         "fusion_attention_heads": 4,
         "fusion_dropout": 0.1,
+        "fusion_cross_asset_mixer_enabled": False,   # A4 toggle (kept off by default for checkpoint compatibility)
+        "fusion_cross_asset_mixer_layers": 1,
+        "fusion_cross_asset_mixer_expansion": 2.0,
+        "fusion_cross_asset_mixer_dropout": 0.1,
+        "fusion_alpha_head_hidden_dims": [],         # A3 toggle (empty = legacy direct logits head)
+        "fusion_alpha_head_dropout": 0.1,
 
         # Dirichlet alpha activation (controls action concentration)
-        "dirichlet_alpha_activation": "elu",  # ✅ RECOMMENDED: More stable than softplus
+        "dirichlet_alpha_activation": "softplus",  # Stable strictly-positive alpha map
         "dirichlet_exp_clip": (-5.0, 3.0),
+        "dirichlet_logit_temperature": 1.0,
+        "dirichlet_alpha_cap": 100.0,
 
         # Dirichlet exploration (epsilon annealing)
         "dirichlet_epsilon": {

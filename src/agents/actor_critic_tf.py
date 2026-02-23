@@ -30,6 +30,12 @@ _DEFAULT_ATTENTION_DROPOUT = _DEFAULT_AGENT_PARAMS.get('attention_dropout', 0.1)
 _DEFAULT_FUSION_EMBED_DIM = _DEFAULT_AGENT_PARAMS.get('fusion_embed_dim', 128)
 _DEFAULT_FUSION_HEADS = _DEFAULT_AGENT_PARAMS.get('fusion_attention_heads', 4)
 _DEFAULT_FUSION_DROPOUT = _DEFAULT_AGENT_PARAMS.get('fusion_dropout', 0.1)
+_DEFAULT_FUSION_ALPHA_HEAD_HIDDEN_DIMS = _DEFAULT_AGENT_PARAMS.get('fusion_alpha_head_hidden_dims', [])
+_DEFAULT_FUSION_ALPHA_HEAD_DROPOUT = _DEFAULT_AGENT_PARAMS.get('fusion_alpha_head_dropout', _DEFAULT_FUSION_DROPOUT)
+_DEFAULT_FUSION_CROSS_ASSET_MIXER_ENABLED = bool(_DEFAULT_AGENT_PARAMS.get('fusion_cross_asset_mixer_enabled', False))
+_DEFAULT_FUSION_CROSS_ASSET_MIXER_LAYERS = int(_DEFAULT_AGENT_PARAMS.get('fusion_cross_asset_mixer_layers', 1))
+_DEFAULT_FUSION_CROSS_ASSET_MIXER_EXPANSION = float(_DEFAULT_AGENT_PARAMS.get('fusion_cross_asset_mixer_expansion', 2.0))
+_DEFAULT_FUSION_CROSS_ASSET_MIXER_DROPOUT = _DEFAULT_AGENT_PARAMS.get('fusion_cross_asset_mixer_dropout', _DEFAULT_FUSION_DROPOUT)
 _DEFAULT_ALPHA_ACTIVATION = _DEFAULT_AGENT_PARAMS.get('dirichlet_alpha_activation', 'elu')
 _DEFAULT_EXP_CLIP = tuple(_DEFAULT_AGENT_PARAMS.get('dirichlet_exp_clip', (-5.0, 3.0)))
 
@@ -130,6 +136,54 @@ class MultiHeadSelfAttention(layers.Layer):
         output = self.layernorm(x + output)
         
         return output
+
+
+class CrossAssetMixerBlock(layers.Layer):
+    """
+    Lightweight cross-asset mixer block:
+    pre-norm self-attention + feed-forward residual.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        expansion: float = 2.0,
+        dropout: float = 0.1,
+        name: str = "cross_asset_mixer",
+    ):
+        super(CrossAssetMixerBlock, self).__init__(name=name)
+        if d_model % num_heads != 0:
+            num_heads = 1
+        hidden_dim = max(d_model, int(round(d_model * float(expansion))))
+
+        self.norm_attn = layers.LayerNormalization(epsilon=1e-6, name=f"{name}_norm_attn")
+        self.attn = layers.MultiHeadAttention(
+            num_heads=int(num_heads),
+            key_dim=max(1, d_model // int(num_heads)),
+            dropout=dropout,
+            name=f"{name}_attn",
+        )
+        self.attn_dropout = layers.Dropout(dropout, name=f"{name}_attn_dropout")
+
+        self.norm_ffn = layers.LayerNormalization(epsilon=1e-6, name=f"{name}_norm_ffn")
+        self.ffn_dense1 = layers.Dense(hidden_dim, activation="gelu", name=f"{name}_ffn_dense1")
+        self.ffn_dropout1 = layers.Dropout(dropout, name=f"{name}_ffn_dropout1")
+        self.ffn_dense2 = layers.Dense(d_model, activation=None, name=f"{name}_ffn_dense2")
+        self.ffn_dropout2 = layers.Dropout(dropout, name=f"{name}_ffn_dropout2")
+
+    def call(self, x, training=None):
+        attn_in = self.norm_attn(x)
+        attn_out = self.attn(attn_in, attn_in, training=training)
+        attn_out = self.attn_dropout(attn_out, training=training)
+        x = x + attn_out
+
+        ffn_in = self.norm_ffn(x)
+        ffn_out = self.ffn_dense1(ffn_in)
+        ffn_out = self.ffn_dropout1(ffn_out, training=training)
+        ffn_out = self.ffn_dense2(ffn_out)
+        ffn_out = self.ffn_dropout2(ffn_out, training=training)
+        return x + ffn_out
 
 
 # ============================================================================
@@ -635,6 +689,12 @@ class TCNFusionActor(DirichletActor):
         fusion_embed_dim: int = None,
         fusion_attention_heads: int = None,
         fusion_dropout: float = None,
+        fusion_cross_asset_mixer_enabled: Optional[bool] = None,
+        fusion_cross_asset_mixer_layers: Optional[int] = None,
+        fusion_cross_asset_mixer_expansion: Optional[float] = None,
+        fusion_cross_asset_mixer_dropout: Optional[float] = None,
+        fusion_alpha_head_hidden_dims: Optional[List[int]] = None,
+        fusion_alpha_head_dropout: Optional[float] = None,
         name: str = "tcn_fusion_actor",
         epsilon_start: float = 0.5,
         epsilon_min: float = 0.1,
@@ -657,6 +717,18 @@ class TCNFusionActor(DirichletActor):
             fusion_attention_heads = _DEFAULT_FUSION_HEADS
         if fusion_dropout is None:
             fusion_dropout = _DEFAULT_FUSION_DROPOUT
+        if fusion_cross_asset_mixer_enabled is None:
+            fusion_cross_asset_mixer_enabled = _DEFAULT_FUSION_CROSS_ASSET_MIXER_ENABLED
+        if fusion_cross_asset_mixer_layers is None:
+            fusion_cross_asset_mixer_layers = _DEFAULT_FUSION_CROSS_ASSET_MIXER_LAYERS
+        if fusion_cross_asset_mixer_expansion is None:
+            fusion_cross_asset_mixer_expansion = _DEFAULT_FUSION_CROSS_ASSET_MIXER_EXPANSION
+        if fusion_cross_asset_mixer_dropout is None:
+            fusion_cross_asset_mixer_dropout = _DEFAULT_FUSION_CROSS_ASSET_MIXER_DROPOUT
+        if fusion_alpha_head_hidden_dims is None:
+            fusion_alpha_head_hidden_dims = _DEFAULT_FUSION_ALPHA_HEAD_HIDDEN_DIMS
+        if fusion_alpha_head_dropout is None:
+            fusion_alpha_head_dropout = _DEFAULT_FUSION_ALPHA_HEAD_DROPOUT
 
         super(TCNFusionActor, self).__init__(
             name=name,
@@ -707,6 +779,22 @@ class TCNFusionActor(DirichletActor):
             dropout=fusion_dropout,
             name=f"{name}_asset_attention",
         )
+        self.asset_mixer_blocks: List[CrossAssetMixerBlock] = []
+        self.cross_asset_mixer_enabled = bool(fusion_cross_asset_mixer_enabled)
+        if self.cross_asset_mixer_enabled:
+            mixer_layers = max(1, int(fusion_cross_asset_mixer_layers))
+            mixer_dropout = float(fusion_cross_asset_mixer_dropout)
+            mixer_expansion = float(fusion_cross_asset_mixer_expansion)
+            for i in range(mixer_layers):
+                self.asset_mixer_blocks.append(
+                    CrossAssetMixerBlock(
+                        d_model=self.fusion_embed_dim,
+                        num_heads=self.fusion_attention_heads,
+                        expansion=mixer_expansion,
+                        dropout=mixer_dropout,
+                        name=f"{name}_asset_mixer_{i}",
+                    )
+                )
         self.asset_pool = layers.GlobalAveragePooling1D()
 
         self.global_time_pool = layers.GlobalAveragePooling1D()
@@ -714,6 +802,19 @@ class TCNFusionActor(DirichletActor):
         self.global_dropout = layers.Dropout(fusion_dropout)
 
         self.gate_layer = layers.Dense(self.fusion_embed_dim, activation="sigmoid", name=f"{name}_gate")
+        sanitized_alpha_head_dims = [int(x) for x in (fusion_alpha_head_hidden_dims or []) if int(x) > 0]
+        self.use_richer_alpha_head = len(sanitized_alpha_head_dims) > 0
+        self.alpha_pre_norm = None
+        self.alpha_head_blocks: List[Tuple[layers.Dense, layers.Dropout]] = []
+        if self.use_richer_alpha_head:
+            self.alpha_pre_norm = layers.LayerNormalization(epsilon=1e-6, name=f"{name}_alpha_pre_norm")
+            for i, hidden_units in enumerate(sanitized_alpha_head_dims):
+                self.alpha_head_blocks.append(
+                    (
+                        layers.Dense(hidden_units, activation="gelu", name=f"{name}_alpha_head_{i}"),
+                        layers.Dropout(float(fusion_alpha_head_dropout), name=f"{name}_alpha_dropout_{i}"),
+                    )
+                )
         self.output_layer = layers.Dense(
             self.num_actions,
             activation=None,
@@ -822,6 +923,8 @@ class TCNFusionActor(DirichletActor):
         x_assets = self.asset_projection(x_assets)
         x_assets = tf.reshape(x_assets, (batch, self.num_assets, self.fusion_embed_dim))
         x_assets = self.asset_attention(x_assets, training=training)
+        for mixer_block in self.asset_mixer_blocks:
+            x_assets = mixer_block(x_assets, training=training)
         asset_context = self.asset_pool(x_assets)
 
         global_context = self.global_time_pool(context_seq)
@@ -831,7 +934,15 @@ class TCNFusionActor(DirichletActor):
         gate = self.gate_layer(tf.concat([asset_context, global_context], axis=-1))
         fused = gate * asset_context + (1.0 - gate) * global_context
 
-        logits = self.output_layer(fused, training=training)
+        if self.use_richer_alpha_head and self.alpha_pre_norm is not None:
+            alpha_features = self.alpha_pre_norm(fused)
+            for dense_layer, dropout_layer in self.alpha_head_blocks:
+                alpha_features = dense_layer(alpha_features)
+                alpha_features = dropout_layer(alpha_features, training=training)
+        else:
+            alpha_features = fused
+
+        logits = self.output_layer(alpha_features, training=training)
         return self._compute_alpha(logits)
 
 
@@ -1021,6 +1132,10 @@ class TCNFusionCritic(Model):
         fusion_embed_dim: int = None,
         fusion_attention_heads: int = None,
         fusion_dropout: float = None,
+        fusion_cross_asset_mixer_enabled: Optional[bool] = None,
+        fusion_cross_asset_mixer_layers: Optional[int] = None,
+        fusion_cross_asset_mixer_expansion: Optional[float] = None,
+        fusion_cross_asset_mixer_dropout: Optional[float] = None,
         name: str = "tcn_fusion_critic",
     ):
         super(TCNFusionCritic, self).__init__(name=name)
@@ -1039,6 +1154,14 @@ class TCNFusionCritic(Model):
             fusion_attention_heads = _DEFAULT_FUSION_HEADS
         if fusion_dropout is None:
             fusion_dropout = _DEFAULT_FUSION_DROPOUT
+        if fusion_cross_asset_mixer_enabled is None:
+            fusion_cross_asset_mixer_enabled = _DEFAULT_FUSION_CROSS_ASSET_MIXER_ENABLED
+        if fusion_cross_asset_mixer_layers is None:
+            fusion_cross_asset_mixer_layers = _DEFAULT_FUSION_CROSS_ASSET_MIXER_LAYERS
+        if fusion_cross_asset_mixer_expansion is None:
+            fusion_cross_asset_mixer_expansion = _DEFAULT_FUSION_CROSS_ASSET_MIXER_EXPANSION
+        if fusion_cross_asset_mixer_dropout is None:
+            fusion_cross_asset_mixer_dropout = _DEFAULT_FUSION_CROSS_ASSET_MIXER_DROPOUT
 
         self.input_dim = int(input_dim)
         self.num_assets = int(num_assets) if num_assets is not None else 5
@@ -1078,6 +1201,22 @@ class TCNFusionCritic(Model):
             dropout=fusion_dropout,
             name=f"{name}_asset_attention",
         )
+        self.asset_mixer_blocks: List[CrossAssetMixerBlock] = []
+        self.cross_asset_mixer_enabled = bool(fusion_cross_asset_mixer_enabled)
+        if self.cross_asset_mixer_enabled:
+            mixer_layers = max(1, int(fusion_cross_asset_mixer_layers))
+            mixer_dropout = float(fusion_cross_asset_mixer_dropout)
+            mixer_expansion = float(fusion_cross_asset_mixer_expansion)
+            for i in range(mixer_layers):
+                self.asset_mixer_blocks.append(
+                    CrossAssetMixerBlock(
+                        d_model=self.fusion_embed_dim,
+                        num_heads=self.fusion_attention_heads,
+                        expansion=mixer_expansion,
+                        dropout=mixer_dropout,
+                        name=f"{name}_asset_mixer_{i}",
+                    )
+                )
         self.asset_pool = layers.GlobalAveragePooling1D()
 
         self.global_time_pool = layers.GlobalAveragePooling1D()
@@ -1181,6 +1320,8 @@ class TCNFusionCritic(Model):
         x_assets = self.asset_projection(x_assets)
         x_assets = tf.reshape(x_assets, (batch, self.num_assets, self.fusion_embed_dim))
         x_assets = self.asset_attention(x_assets, training=training)
+        for mixer_block in self.asset_mixer_blocks:
+            x_assets = mixer_block(x_assets, training=training)
         asset_context = self.asset_pool(x_assets)
 
         global_context = self.global_time_pool(context_seq)
@@ -1201,7 +1342,7 @@ def _resolve_dirichlet_epsilon_kwargs(config: Dict[str, Any]) -> Dict[str, Any]:
     epsilon_cfg = config.get("dirichlet_epsilon") or {}
     epsilon_start = float(epsilon_cfg.get("max", epsilon_cfg.get("start", 0.5)))
     epsilon_min = float(epsilon_cfg.get("min", 0.1))
-    alpha_activation = str(config.get("dirichlet_alpha_activation", "elu"))
+    alpha_activation = str(config.get("dirichlet_alpha_activation", _DEFAULT_ALPHA_ACTIVATION))
     exp_clip_cfg = config.get("dirichlet_exp_clip", (-5.0, 3.0))
     try:
         exp_clip = (float(exp_clip_cfg[0]), float(exp_clip_cfg[1]))
@@ -1255,6 +1396,12 @@ def create_actor_critic(architecture: str,
                 fusion_embed_dim=config.get('fusion_embed_dim', _DEFAULT_FUSION_EMBED_DIM),
                 fusion_attention_heads=config.get('fusion_attention_heads', _DEFAULT_FUSION_HEADS),
                 fusion_dropout=config.get('fusion_dropout', _DEFAULT_FUSION_DROPOUT),
+                fusion_cross_asset_mixer_enabled=config.get('fusion_cross_asset_mixer_enabled', _DEFAULT_FUSION_CROSS_ASSET_MIXER_ENABLED),
+                fusion_cross_asset_mixer_layers=config.get('fusion_cross_asset_mixer_layers', _DEFAULT_FUSION_CROSS_ASSET_MIXER_LAYERS),
+                fusion_cross_asset_mixer_expansion=config.get('fusion_cross_asset_mixer_expansion', _DEFAULT_FUSION_CROSS_ASSET_MIXER_EXPANSION),
+                fusion_cross_asset_mixer_dropout=config.get('fusion_cross_asset_mixer_dropout', _DEFAULT_FUSION_CROSS_ASSET_MIXER_DROPOUT),
+                fusion_alpha_head_hidden_dims=config.get('fusion_alpha_head_hidden_dims', _DEFAULT_FUSION_ALPHA_HEAD_HIDDEN_DIMS),
+                fusion_alpha_head_dropout=config.get('fusion_alpha_head_dropout', _DEFAULT_FUSION_ALPHA_HEAD_DROPOUT),
                 **epsilon_kwargs,
             )
             critic = TCNFusionCritic(
@@ -1269,6 +1416,10 @@ def create_actor_critic(architecture: str,
                 fusion_embed_dim=config.get('fusion_embed_dim', _DEFAULT_FUSION_EMBED_DIM),
                 fusion_attention_heads=config.get('fusion_attention_heads', _DEFAULT_FUSION_HEADS),
                 fusion_dropout=config.get('fusion_dropout', _DEFAULT_FUSION_DROPOUT),
+                fusion_cross_asset_mixer_enabled=config.get('fusion_cross_asset_mixer_enabled', _DEFAULT_FUSION_CROSS_ASSET_MIXER_ENABLED),
+                fusion_cross_asset_mixer_layers=config.get('fusion_cross_asset_mixer_layers', _DEFAULT_FUSION_CROSS_ASSET_MIXER_LAYERS),
+                fusion_cross_asset_mixer_expansion=config.get('fusion_cross_asset_mixer_expansion', _DEFAULT_FUSION_CROSS_ASSET_MIXER_EXPANSION),
+                fusion_cross_asset_mixer_dropout=config.get('fusion_cross_asset_mixer_dropout', _DEFAULT_FUSION_CROSS_ASSET_MIXER_DROPOUT),
             )
         elif config.get('use_attention', False):
             actor = TCNAttentionActor(
@@ -1324,6 +1475,12 @@ def create_actor_critic(architecture: str,
             fusion_embed_dim=config.get('fusion_embed_dim', _DEFAULT_FUSION_EMBED_DIM),
             fusion_attention_heads=config.get('fusion_attention_heads', _DEFAULT_FUSION_HEADS),
             fusion_dropout=config.get('fusion_dropout', _DEFAULT_FUSION_DROPOUT),
+            fusion_cross_asset_mixer_enabled=config.get('fusion_cross_asset_mixer_enabled', _DEFAULT_FUSION_CROSS_ASSET_MIXER_ENABLED),
+            fusion_cross_asset_mixer_layers=config.get('fusion_cross_asset_mixer_layers', _DEFAULT_FUSION_CROSS_ASSET_MIXER_LAYERS),
+            fusion_cross_asset_mixer_expansion=config.get('fusion_cross_asset_mixer_expansion', _DEFAULT_FUSION_CROSS_ASSET_MIXER_EXPANSION),
+            fusion_cross_asset_mixer_dropout=config.get('fusion_cross_asset_mixer_dropout', _DEFAULT_FUSION_CROSS_ASSET_MIXER_DROPOUT),
+            fusion_alpha_head_hidden_dims=config.get('fusion_alpha_head_hidden_dims', _DEFAULT_FUSION_ALPHA_HEAD_HIDDEN_DIMS),
+            fusion_alpha_head_dropout=config.get('fusion_alpha_head_dropout', _DEFAULT_FUSION_ALPHA_HEAD_DROPOUT),
             **epsilon_kwargs,
         )
         critic = TCNFusionCritic(
@@ -1338,6 +1495,10 @@ def create_actor_critic(architecture: str,
             fusion_embed_dim=config.get('fusion_embed_dim', _DEFAULT_FUSION_EMBED_DIM),
             fusion_attention_heads=config.get('fusion_attention_heads', _DEFAULT_FUSION_HEADS),
             fusion_dropout=config.get('fusion_dropout', _DEFAULT_FUSION_DROPOUT),
+            fusion_cross_asset_mixer_enabled=config.get('fusion_cross_asset_mixer_enabled', _DEFAULT_FUSION_CROSS_ASSET_MIXER_ENABLED),
+            fusion_cross_asset_mixer_layers=config.get('fusion_cross_asset_mixer_layers', _DEFAULT_FUSION_CROSS_ASSET_MIXER_LAYERS),
+            fusion_cross_asset_mixer_expansion=config.get('fusion_cross_asset_mixer_expansion', _DEFAULT_FUSION_CROSS_ASSET_MIXER_EXPANSION),
+            fusion_cross_asset_mixer_dropout=config.get('fusion_cross_asset_mixer_dropout', _DEFAULT_FUSION_CROSS_ASSET_MIXER_DROPOUT),
         )
 
     elif arch_upper == 'TCN_ATTENTION':
