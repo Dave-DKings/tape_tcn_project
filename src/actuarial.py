@@ -45,7 +45,15 @@ class DrawdownReserveEstimator:
         Args:
             config: Configuration dictionary containing 'actuarial_params'.
         """
-        self.params = config.get('actuarial_params', {})
+        # Support both legacy top-level and current feature_params nesting.
+        # `feature_params.actuarial_params` takes precedence when both exist.
+        top_level_params = config.get('actuarial_params', {})
+        nested_params = config.get('feature_params', {}).get('actuarial_params', {})
+        self.params = {}
+        if isinstance(top_level_params, dict):
+            self.params.update(top_level_params)
+        if isinstance(nested_params, dict):
+            self.params.update(nested_params)
         self.buckets = self.params.get('severity_buckets', [0.05, 0.10, 0.15, 0.20])
         self.horizons = self.params.get('development_horizons', [10, 20, 30, 60, 90, 120])
         self.min_events = self.params.get('min_events_for_credibility', 5)

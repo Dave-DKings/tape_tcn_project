@@ -1249,6 +1249,9 @@ def load_training_metadata_into_config(
 
     if verbose:
         run_ctx = metadata.get("Run_Context", {}) or {}
+        feature_meta = metadata.get("Feature_Groups", {}) or {}
+        actuarial_cols_meta = feature_meta.get("actuarial_columns_detected", []) or []
+        actuarial_missing_meta = feature_meta.get("actuarial_columns_missing_from_feature_list", []) or []
         print("✅ Applied training metadata to config")
         print(f"   Metadata: {meta_path}")
         if run_ctx.get("timestamp"):
@@ -1271,6 +1274,9 @@ def load_training_metadata_into_config(
             f"   Retroactive episode scaling: "
             f"{bool(env_params.get('retroactive_episode_reward_scaling', False))}"
         )
+        print(f"   Actuarial columns detected: {len(actuarial_cols_meta)}")
+        if actuarial_missing_meta:
+            print(f"   ⚠️ Actuarial columns missing from feature list: {actuarial_missing_meta}")
 
     return config
 
@@ -1480,6 +1486,28 @@ def prepare_phase1_dataset(
     # Add Alpha features (if enabled)
     print("\n📊 Integrating Alpha features (if enabled)...")
     master_df = processor.add_quant_alpha_features(master_df)
+
+    # Add actuarial features (if enabled)
+    print("\n📊 Integrating actuarial features (if enabled)...")
+    master_df = processor.add_actuarial_features(master_df)
+    actuarial_cols = [col for col in master_df.columns if col.startswith("Actuarial_")]
+    actuarial_enabled = bool(
+        config.get("feature_params", {}).get("actuarial_params", {}).get("enabled", False)
+    )
+    if actuarial_cols:
+        non_null_counts = {
+            col: int(master_df[col].notna().sum())
+            for col in sorted(actuarial_cols)
+        }
+        print(
+            f"   ✅ Actuarial columns in dataset: {len(actuarial_cols)} "
+            f"(enabled={actuarial_enabled})"
+        )
+        print(f"   📋 Non-null counts: {non_null_counts}")
+    elif actuarial_enabled:
+        print("   ⚠️ Actuarial is enabled but no Actuarial_ columns were produced.")
+    else:
+        print("   ℹ️ Actuarial features disabled by config.")
     
     print(f"\n✅ Final master DF shape: {master_df.shape}")
     print(f"   ✅ Total features: {len(master_df.columns)}")
@@ -1891,6 +1919,26 @@ def run_experiment6_tape(
     print(f"   Eigenvalues: {covariance_columns}")
     print(f"   Train shape: {experiment_train_df.shape}")
     print(f"   Test shape: {experiment_test_df.shape}")
+    actuarial_enabled_cfg = bool(
+        config.get("feature_params", {}).get("actuarial_params", {}).get("enabled", False)
+    )
+    actuarial_columns_runtime = sorted(
+        [col for col in phase1_data.master_df.columns if str(col).startswith("Actuarial_")]
+    )
+    actuarial_non_null_master_runtime = {
+        col: int(phase1_data.master_df[col].notna().sum()) for col in actuarial_columns_runtime
+    }
+    if actuarial_columns_runtime:
+        total_non_null_runtime = int(sum(actuarial_non_null_master_runtime.values()))
+        print(
+            f"   🧮 Actuarial columns: {len(actuarial_columns_runtime)} detected "
+            f"(enabled={actuarial_enabled_cfg}) | total non-null={total_non_null_runtime}"
+        )
+        print(f"      {actuarial_non_null_master_runtime}")
+    elif actuarial_enabled_cfg:
+        print("   ⚠️ Actuarial is enabled but no Actuarial_ columns were detected in master_df.")
+    else:
+        print("   ℹ️ Actuarial features disabled by config.")
 
     raw_turnover_curriculum = training_params.get(
         "turnover_penalty_curriculum",
@@ -2832,6 +2880,31 @@ def run_experiment6_tape(
     cross_sectional_cfg = feature_params.get("cross_sectional_features", {}) if isinstance(feature_params, dict) else {}
     actuarial_cfg = feature_params.get("actuarial_params", {}) if isinstance(feature_params, dict) else {}
     actuarial_columns = sorted([col for col in phase1_data.master_df.columns if "Actuarial_" in col])
+    actuarial_non_null_counts_master = {
+        col: int(phase1_data.master_df[col].notna().sum()) for col in actuarial_columns
+    }
+    actuarial_non_null_counts_train = {
+        col: int(phase1_data.train_df[col].notna().sum()) for col in actuarial_columns if col in phase1_data.train_df.columns
+    }
+    actuarial_non_null_counts_test = {
+        col: int(phase1_data.test_df[col].notna().sum()) for col in actuarial_columns if col in phase1_data.test_df.columns
+    }
+    phase1_feature_cols_for_audit: List[str] = []
+    if data_processor is not None:
+        try:
+            phase1_feature_cols_for_audit = list(data_processor.get_feature_columns("phase1"))
+        except Exception as exc:
+            print(f"⚠️ Could not collect phase1 feature list for actuarial audit: {type(exc).__name__}: {exc}")
+    actuarial_columns_missing_from_feature_list = (
+        sorted([col for col in actuarial_columns if col not in set(phase1_feature_cols_for_audit)])
+        if phase1_feature_cols_for_audit
+        else []
+    )
+    actuarial_columns_in_feature_list = (
+        sorted([col for col in actuarial_columns if col in set(phase1_feature_cols_for_audit)])
+        if phase1_feature_cols_for_audit
+        else []
+    )
     checkpoint_strategy = {
         "normal_checkpoint_naming": "exp{exp_idx}_tape_hw_ep{episode:05d}_sh{tag}",
         "normal_checkpoint_selection": "best_deterministic_validation_sharpe",
@@ -2919,6 +2992,11 @@ def run_experiment6_tape(
             "cross_sectional_features": copy.deepcopy(cross_sectional_cfg),
             "actuarial_features": copy.deepcopy(actuarial_cfg),
             "actuarial_columns_detected": actuarial_columns,
+            "actuarial_columns_non_null_counts_master": actuarial_non_null_counts_master,
+            "actuarial_columns_non_null_counts_train": actuarial_non_null_counts_train,
+            "actuarial_columns_non_null_counts_test": actuarial_non_null_counts_test,
+            "actuarial_columns_in_feature_list": actuarial_columns_in_feature_list,
+            "actuarial_columns_missing_from_feature_list": actuarial_columns_missing_from_feature_list,
         },
         "Training_Hyperparameters": {
             "max_total_timesteps": max_total_timesteps,

@@ -1967,6 +1967,7 @@ class DataProcessor:
         """
         act_config = self.config.get('feature_params', {}).get('actuarial_params')
         if not act_config or not act_config.get('enabled', False):
+            self._actuarial_feature_names = []
             logger.info("Actuarial features disabled.")
             return df
             
@@ -1987,6 +1988,15 @@ class DataProcessor:
             df[k] = np.nan
             
         # Process each ticker independently
+        default_preds = {
+            "Actuarial_Expected_Recovery": 0.0,
+            "Actuarial_Prob_30d": 1.0,
+            "Actuarial_Prob_60d": 1.0,
+            "Actuarial_Reserve_Severity": 0.0,
+        }
+        total_prediction_failures = 0
+        total_fit_failures = 0
+
         for ticker in self.asset_tickers:
             logger.info(f"  Processing actuarial features for {ticker}...")
             
@@ -1998,8 +2008,22 @@ class DataProcessor:
                 continue
                 
             # Ensure prices has Date index for the estimator
+            dates = pd.to_datetime(ticker_df[self.date_col], errors="coerce")
+            bad_dates = int(dates.isna().sum())
+            if bad_dates > 0:
+                logger.warning(
+                    "  ⚠️ %s has %d invalid dates while computing actuarial features; dropping those rows for this ticker.",
+                    ticker,
+                    bad_dates,
+                )
+                valid_mask = dates.notna()
+                ticker_df = ticker_df.loc[valid_mask]
+                dates = dates.loc[valid_mask]
+                if ticker_df.empty:
+                    continue
+            ticker_df = ticker_df.copy()
+            ticker_df[self.date_col] = dates.values
             prices = ticker_df.set_index(self.date_col)[self.close_col]
-            dates = ticker_df[self.date_col]
             
             # Pre-calculate drawdowns for speed
             running_max = prices.cummax()
@@ -2025,7 +2049,16 @@ class DataProcessor:
             
             # Initial fit
             if len(prices) > min_window:
-                estimator.fit(prices.iloc[:min_window])
+                try:
+                    estimator.fit(prices.iloc[:min_window])
+                except Exception as exc:
+                    total_fit_failures += 1
+                    logger.warning(
+                        "  ⚠️ Initial actuarial fit failed for %s: %s: %s",
+                        ticker,
+                        type(exc).__name__,
+                        exc,
+                    )
             
             for i in range(min_window, len(ticker_df)):
                 current_dd = dd_values[i] # Negative float, e.g. -0.15
@@ -2035,16 +2068,39 @@ class DataProcessor:
                 if current_dd == 0:
                      was_in_dd = dd_values[i-1] < 0 if i > 0 else False
                      if was_in_dd:
-                         estimator.fit(prices.iloc[:i+1])
+                         try:
+                             estimator.fit(prices.iloc[:i+1])
+                         except Exception as exc:
+                             total_fit_failures += 1
+                             logger.warning(
+                                 "  ⚠️ Rolling actuarial fit failed for %s at idx=%d: %s: %s",
+                                 ticker,
+                                 i,
+                                 type(exc).__name__,
+                                 exc,
+                             )
                      
                      # Set predictions to 0/safe values
-                     df.at[indices[i], "Actuarial_Expected_Recovery"] = 0.0
-                     df.at[indices[i], "Actuarial_Prob_30d"] = 1.0
-                     df.at[indices[i], "Actuarial_Prob_60d"] = 1.0
-                     df.at[indices[i], "Actuarial_Reserve_Severity"] = 0.0
+                     df.at[indices[i], "Actuarial_Expected_Recovery"] = default_preds["Actuarial_Expected_Recovery"]
+                     df.at[indices[i], "Actuarial_Prob_30d"] = default_preds["Actuarial_Prob_30d"]
+                     df.at[indices[i], "Actuarial_Prob_60d"] = default_preds["Actuarial_Prob_60d"]
+                     df.at[indices[i], "Actuarial_Reserve_Severity"] = default_preds["Actuarial_Reserve_Severity"]
                      
                 else:
-                    preds = estimator.predict(abs(current_dd), days_elapsed)
+                    try:
+                        preds = estimator.predict(abs(current_dd), days_elapsed)
+                    except Exception as exc:
+                        total_prediction_failures += 1
+                        logger.warning(
+                            "  ⚠️ Actuarial predict failed for %s at idx=%d (dd=%.4f, elapsed=%d): %s: %s",
+                            ticker,
+                            i,
+                            float(current_dd),
+                            int(days_elapsed),
+                            type(exc).__name__,
+                            exc,
+                        )
+                        preds = default_preds
                     
                     df.at[indices[i], "Actuarial_Expected_Recovery"] = preds["Actuarial_Expected_Recovery"]
                     df.at[indices[i], "Actuarial_Prob_30d"] = preds["Actuarial_Prob_30d"]
@@ -2074,7 +2130,27 @@ class DataProcessor:
             logger.info(f"  ℹ️  Filled {filled_count} actuarial warm-up NaNs with safe defaults")
 
         self._actuarial_feature_names = list(new_features.keys())
-        logger.info(f"  ✅ Actuarial features added: {self._actuarial_feature_names}")
+        missing_cols = [c for c in self._actuarial_feature_names if c not in df.columns]
+        non_null_counts = {
+            c: int(df[c].notna().sum())
+            for c in self._actuarial_feature_names
+            if c in df.columns
+        }
+        total_non_null = int(sum(non_null_counts.values()))
+        if missing_cols:
+            logger.warning("  ⚠️ Missing actuarial feature columns after computation: %s", missing_cols)
+        logger.info(
+            "  ✅ Actuarial features: computed %d columns with %d non-null values | per-column=%s",
+            len(self._actuarial_feature_names),
+            total_non_null,
+            non_null_counts,
+        )
+        if total_fit_failures > 0 or total_prediction_failures > 0:
+            logger.warning(
+                "  ⚠️ Actuarial pipeline fallback usage: fit_failures=%d, predict_failures=%d",
+                total_fit_failures,
+                total_prediction_failures,
+            )
         return df
 
     def prepare_features_phase1(self, 
