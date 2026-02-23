@@ -1525,6 +1525,19 @@ def prepare_phase1_dataset(
     feature_cols = processor.get_feature_columns("phase1")
     available_cols = [col for col in feature_cols if col in master_df.columns]
     missing_cols = [col for col in feature_cols if col not in master_df.columns]
+    selection_cfg = config.get("feature_params", {}).get("feature_selection", {})
+    if selection_cfg.get("enforce_allowlist", False):
+        plan_name = selection_cfg.get("feature_audit_plan_name", "feature_audit_allowlist")
+        expected_total = selection_cfg.get("feature_audit_expected_total_count")
+        print(f"🧭 Feature audit plan: {plan_name} (allowlist enabled)")
+        print(f"   active feature count (phase1): {len(feature_cols)}")
+        if expected_total is not None:
+            try:
+                exp = int(expected_total)
+                status = "✅" if len(feature_cols) == exp else "⚠️"
+                print(f"   {status} expected active features: {exp}")
+            except Exception:
+                pass
     if missing_cols:
         print(f"⚠️ Missing features before normalisation: {missing_cols}")
 

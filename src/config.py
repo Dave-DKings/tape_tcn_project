@@ -107,6 +107,125 @@ PHASE12_REDUNDANT_FEATURES_TO_DISABLE = [
     "ISM_MAN_PMI_diff",
 ]
 
+# Feature-audit pruning (2026-02-22):
+# Target active feature space: 49 non-actuarial features (+4 actuarial = 53).
+# Notes:
+# - Keeps VIX_zscore (implied-vol context), while dropping VIX_level.
+# - Applies high-confidence redundancy/noise removals from audit.
+# - Uses drop-only policy to avoid introducing new engineered columns mid-run.
+PHASE12_AUDIT_FEATURES_TO_DISABLE = [
+    # Technical overlap / non-stationary channels
+    "BBL_20_2.0",
+    "BBU_20_2.0",
+    "MACD_12_26_9",
+    "MACDs_12_26_9",
+    "ATRr_14",
+    "VOL_SMA_20",
+    "OBV",
+    # Directional movement pair (collapsed out of baseline to reduce dimension)
+    "DMP_14",
+    "DMN_14",
+    # Covariance tail noise
+    "Covariance_Eigenvalue_2",
+    # Fundamental redundancies
+    "Fundamental_FCFE_Sign",
+    "Fundamental_Staleness_Quarters",
+    # Interest-rate redundancy cluster
+    "EFFR_diff",
+    "EFFR_zscore",
+    "SOFR_level",
+    "FEDFUNDS_diff",
+    "FEDFUNDS_zscore",
+    "DGS10_slope",
+    "DGS2_level",
+    "DGS2_diff",
+    # Inflation overlap
+    "BreakevenInf5Y_level",
+    "BreakevenInf5Y_diff",
+    # Credit redundancy
+    "IG_Credit_level",
+    "IG_Credit_diff",
+    "HY_Credit_level",
+]
+
+# Canonical Exp6 feature-audit active set (49 non-actuarial features).
+# This is enforced via allowlist to keep training/evaluation deterministic.
+PHASE12_AUDIT_ACTIVE_FEATURES_NON_ACTUARIAL = [
+    # Returns + risk moments
+    "LogReturn_1d",
+    "LogReturn_5d",
+    "LogReturn_10d",
+    "LogReturn_21d",
+    "RollingVolatility_21d",
+    "DownsideSemiVar_21d",
+    "RealizedSkew_21d",
+    "RealizedKurtosis_21d",
+    # Technical indicators
+    "MACDh_12_26_9",
+    "RSI_14",
+    "STOCHd_14_3_3",
+    "ADX_14",
+    "NATR_14",
+    "MFI_14",
+    # Regime/cross-sectional alpha
+    "Regime_Volatility_Ratio",
+    "Regime_Price_vs_SMA_Short",
+    "Regime_SMA_Short_Slope",
+    "Regime_SMA_Long_Slope",
+    "Regime_Momentum_Short",
+    "Regime_Momentum_Long",
+    "Regime_Corr_to_Market",
+    "Regime_Breadth_Positive",
+    "CrossSectional_ZScore_LogReturn_1d",
+    "Residual_Momentum_21",
+    "Volume_Percentile_63",
+    "ShortTerm_Reversal_5",
+    "VolOfVol_63",
+    "Beta_to_Market",
+    "OBV_Delta_Norm_21",
+    # Covariance
+    "Covariance_Eigenvalue_0",
+    "Covariance_Eigenvalue_1",
+    # Yield-curve / rates / inflation / credit / implied vol
+    "YieldCurve_Spread",
+    "YieldCurve_Inverted_Flag",
+    "SOFR_diff",
+    "DGS10_level",
+    "DGS10_diff",
+    "T10Y2Y_level",
+    "TIPS10Y_level",
+    "TIPS10Y_diff",
+    "BreakevenInf10Y_level",
+    "BreakevenInf10Y_diff",
+    "IG_Credit_zscore",
+    "HY_Credit_diff",
+    "HY_Credit_zscore",
+    "VIX_zscore",
+    # Fundamentals
+    "Fundamental_FCFE_Delta",
+    "Fundamental_Revenue_Delta",
+    "Fundamental_NCFO_Delta",
+    "Fundamental_Staleness_Days",
+]
+
+PHASE12_AUDIT_ACTIVE_FEATURES_ACTUARIAL = [
+    "Actuarial_Expected_Recovery",
+    "Actuarial_Prob_30d",
+    "Actuarial_Prob_60d",
+    "Actuarial_Reserve_Severity",
+]
+
+PHASE12_AUDIT_ACTIVE_FEATURES = list(
+    dict.fromkeys(
+        PHASE12_AUDIT_ACTIVE_FEATURES_NON_ACTUARIAL
+        + PHASE12_AUDIT_ACTIVE_FEATURES_ACTUARIAL
+    )
+)
+
+def _ordered_unique(items):
+    """Preserve first occurrence order while removing duplicates."""
+    return list(dict.fromkeys(items))
+
 FEATURES_TO_DISABLE = [
     "BAMLC0A0CMEY_level",
     "BAMLC0A0CMEY_diff",
@@ -117,7 +236,6 @@ FEATURES_TO_DISABLE = [
     "DAAA_level",
     "DAAA_zscore",
     "VIX_level",
-    "VIX_zscore",
     "MOVE_level",
     "MOVE_zscore",
     "UNRATE_level",
@@ -141,11 +259,20 @@ FEATURES_TO_DISABLE = [
     "FedBalanceSheet_diff",
     "ON_RRP_level",
     "ON_RRP_diff",
-] + PHASE12_REDUNDANT_FEATURES_TO_DISABLE
+] + PHASE12_REDUNDANT_FEATURES_TO_DISABLE + PHASE12_AUDIT_FEATURES_TO_DISABLE
+
+FEATURES_TO_DISABLE = _ordered_unique(FEATURES_TO_DISABLE)
 
 FEATURE_SELECTION_CONFIG = {
     "disable_features": True,
     "disabled_features": FEATURES_TO_DISABLE,
+    # Enforce the audit plan globally (Phase 1 and eval paths).
+    "enforce_allowlist": True,
+    "allowlist_apply_to_phase2": False,
+    "active_features_allowlist": copy.deepcopy(PHASE12_AUDIT_ACTIVE_FEATURES),
+    "feature_audit_plan_name": "exp6_feature_audit_20260221_v2",
+    "feature_audit_expected_non_actuarial_count": len(PHASE12_AUDIT_ACTIVE_FEATURES_NON_ACTUARIAL),
+    "feature_audit_expected_total_count": len(PHASE12_AUDIT_ACTIVE_FEATURES),
 }
 
 ALPHA_FEATURES_CONFIG = {

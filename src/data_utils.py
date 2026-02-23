@@ -2558,6 +2558,45 @@ class DataProcessor:
                     len(feature_cols),
                     before,
                 )
+
+        # Optional hard allowlist mode (feature-audit plan).
+        # This guarantees the model sees only the approved feature set even when
+        # runtime feature families are discovered dynamically.
+        allowlist_enabled = bool(selection_cfg.get('enforce_allowlist', False))
+        allowlist_apply_to_phase2 = bool(selection_cfg.get('allowlist_apply_to_phase2', False))
+        if allowlist_enabled and (phase == 'phase1' or allowlist_apply_to_phase2):
+            allowlist = list(dict.fromkeys(selection_cfg.get('active_features_allowlist', []) or []))
+            if allowlist:
+                before_allowlist = list(feature_cols)
+                before_set = set(before_allowlist)
+                allow_set = set(allowlist)
+                # Preserve allowlist order for deterministic state layouts.
+                feature_cols = [col for col in allowlist if col in before_set]
+                missing_from_runtime = [col for col in allowlist if col not in before_set]
+                logger.info(
+                    "Feature allowlist applied: kept %d/%d requested columns (phase=%s)",
+                    len(feature_cols),
+                    len(allowlist),
+                    phase,
+                )
+                if missing_from_runtime:
+                    logger.warning(
+                        "⚠️ Allowlist columns missing from runtime feature pool (%d): %s",
+                        len(missing_from_runtime),
+                        missing_from_runtime[:20],
+                    )
+                expected_total = selection_cfg.get("feature_audit_expected_total_count")
+                if expected_total is not None and phase == 'phase1':
+                    try:
+                        expected_total_int = int(expected_total)
+                        if len(feature_cols) != expected_total_int:
+                            logger.warning(
+                                "⚠️ Feature-audit expected count mismatch: expected=%d got=%d",
+                                expected_total_int,
+                                len(feature_cols),
+                            )
+                    except Exception:
+                        pass
         
         return feature_cols
     
