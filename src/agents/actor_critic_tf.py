@@ -349,6 +349,11 @@ class DirichletActor(Model):
         exp_clip: Tuple[float, float] = None,
         logit_temperature: float = 1.0,  # New parameter
         alpha_cap: float = None,         # New parameter
+        adaptive_temperature_enabled: bool = False,
+        adaptive_temperature_base: float = 1.0,
+        adaptive_temperature_slope: float = 0.0,
+        adaptive_temperature_min: float = 0.8,
+        adaptive_temperature_max: float = 2.5,
         **kwargs,
     ):
         super(DirichletActor, self).__init__(name=name, **kwargs)
@@ -366,6 +371,13 @@ class DirichletActor(Model):
         # Dirichlet Controls
         self._logit_temperature = float(logit_temperature) if logit_temperature else 1.0
         self._alpha_cap = float(alpha_cap) if alpha_cap else None
+        self._adaptive_temperature_enabled = bool(adaptive_temperature_enabled)
+        self._adaptive_temperature_base = float(max(adaptive_temperature_base, 1e-6))
+        self._adaptive_temperature_slope = float(max(adaptive_temperature_slope, 0.0))
+        temp_min = float(max(adaptive_temperature_min, 1e-6))
+        temp_max = float(max(adaptive_temperature_max, temp_min))
+        self._adaptive_temperature_min = temp_min
+        self._adaptive_temperature_max = temp_max
 
         self._dirichlet_epsilon = tf.Variable(
             float(epsilon_start),
@@ -413,7 +425,19 @@ class DirichletActor(Model):
         activation = self._alpha_activation
         
         # 1. Apply Temperature Scaling (flatten logits before activation)
-        if abs(self._logit_temperature - 1.0) > 1e-6:
+        if self._adaptive_temperature_enabled:
+            abs_logits = tf.stop_gradient(tf.abs(logits))
+            temp = (
+                tf.cast(self._adaptive_temperature_base, logits.dtype)
+                + tf.cast(self._adaptive_temperature_slope, logits.dtype) * abs_logits
+            )
+            temp = tf.clip_by_value(
+                temp,
+                tf.cast(self._adaptive_temperature_min, logits.dtype),
+                tf.cast(self._adaptive_temperature_max, logits.dtype),
+            )
+            scaled_logits = logits / tf.maximum(temp, tf.cast(1e-6, logits.dtype))
+        elif abs(self._logit_temperature - 1.0) > 1e-6:
             scaled_logits = logits / self._logit_temperature
         else:
             scaled_logits = logits
@@ -471,6 +495,11 @@ class TCNActor(DirichletActor):
         exp_clip: Tuple[float, float] = None,
         logit_temperature: float = None,
         alpha_cap: float = None,
+        adaptive_temperature_enabled: bool = False,
+        adaptive_temperature_base: float = 1.0,
+        adaptive_temperature_slope: float = 0.0,
+        adaptive_temperature_min: float = 0.8,
+        adaptive_temperature_max: float = 2.5,
     ):
         # Apply config defaults
         if tcn_filters is None:
@@ -490,6 +519,11 @@ class TCNActor(DirichletActor):
             exp_clip=exp_clip,
             logit_temperature=logit_temperature,
             alpha_cap=alpha_cap,
+            adaptive_temperature_enabled=adaptive_temperature_enabled,
+            adaptive_temperature_base=adaptive_temperature_base,
+            adaptive_temperature_slope=adaptive_temperature_slope,
+            adaptive_temperature_min=adaptive_temperature_min,
+            adaptive_temperature_max=adaptive_temperature_max,
         )
         
         self.input_dim = input_dim
@@ -571,6 +605,11 @@ class TCNAttentionActor(DirichletActor):
         exp_clip: Tuple[float, float] = None,
         logit_temperature: float = None,
         alpha_cap: float = None,
+        adaptive_temperature_enabled: bool = False,
+        adaptive_temperature_base: float = 1.0,
+        adaptive_temperature_slope: float = 0.0,
+        adaptive_temperature_min: float = 0.8,
+        adaptive_temperature_max: float = 2.5,
     ):
         # Apply config defaults
         if tcn_filters is None:
@@ -594,6 +633,11 @@ class TCNAttentionActor(DirichletActor):
             exp_clip=exp_clip,
             logit_temperature=logit_temperature,
             alpha_cap=alpha_cap,
+            adaptive_temperature_enabled=adaptive_temperature_enabled,
+            adaptive_temperature_base=adaptive_temperature_base,
+            adaptive_temperature_slope=adaptive_temperature_slope,
+            adaptive_temperature_min=adaptive_temperature_min,
+            adaptive_temperature_max=adaptive_temperature_max,
         )
         
         self.input_dim = input_dim
@@ -702,6 +746,11 @@ class TCNFusionActor(DirichletActor):
         exp_clip: Tuple[float, float] = None,
         logit_temperature: float = None,
         alpha_cap: float = None,
+        adaptive_temperature_enabled: bool = False,
+        adaptive_temperature_base: float = 1.0,
+        adaptive_temperature_slope: float = 0.0,
+        adaptive_temperature_min: float = 0.8,
+        adaptive_temperature_max: float = 2.5,
     ):
         if tcn_filters is None:
             tcn_filters = _DEFAULT_TCN_FILTERS
@@ -738,6 +787,11 @@ class TCNFusionActor(DirichletActor):
             exp_clip=exp_clip,
             logit_temperature=logit_temperature,
             alpha_cap=alpha_cap,
+            adaptive_temperature_enabled=adaptive_temperature_enabled,
+            adaptive_temperature_base=adaptive_temperature_base,
+            adaptive_temperature_slope=adaptive_temperature_slope,
+            adaptive_temperature_min=adaptive_temperature_min,
+            adaptive_temperature_max=adaptive_temperature_max,
         )
 
         self.input_dim = int(input_dim)
@@ -1355,7 +1409,15 @@ def _resolve_dirichlet_epsilon_kwargs(config: Dict[str, Any]) -> Dict[str, Any]:
         "exp_clip": exp_clip,
         # New parameters
         "logit_temperature": float(config.get("dirichlet_logit_temperature", 1.0)),
-        "alpha_cap": float(config.get("dirichlet_alpha_cap", 100.0)) if "dirichlet_alpha_cap" in config else None
+        "alpha_cap": float(config.get("dirichlet_alpha_cap", 100.0)) if "dirichlet_alpha_cap" in config else None,
+        # Optional adaptive temperature controller (disabled by default).
+        "adaptive_temperature_enabled": bool(config.get("dirichlet_adaptive_temperature_enabled", False)),
+        "adaptive_temperature_base": float(
+            config.get("dirichlet_adaptive_temperature_base", config.get("dirichlet_logit_temperature", 1.0))
+        ),
+        "adaptive_temperature_slope": float(config.get("dirichlet_adaptive_temperature_slope", 0.0)),
+        "adaptive_temperature_min": float(config.get("dirichlet_adaptive_temperature_min", 0.8)),
+        "adaptive_temperature_max": float(config.get("dirichlet_adaptive_temperature_max", 2.5)),
     }
 
 

@@ -544,6 +544,11 @@ def _extract_effective_agent_params(
         "dirichlet_epsilon",
         "dirichlet_exp_clip",
         "dirichlet_logit_temperature",
+        "dirichlet_adaptive_temperature_enabled",
+        "dirichlet_adaptive_temperature_base",
+        "dirichlet_adaptive_temperature_slope",
+        "dirichlet_adaptive_temperature_min",
+        "dirichlet_adaptive_temperature_max",
         "dirichlet_alpha_cap",
         "logit_temperature",
         "alpha_cap",
@@ -1012,6 +1017,11 @@ def create_experiment6_result_stub(
         "dirichlet_alpha_activation": base_agent_params.get('dirichlet_alpha_activation', 'softplus') if base_agent_params else 'softplus',
         "dirichlet_exp_clip": (-5.0, 3.0),
         "dirichlet_logit_temperature": 1.0,
+        "dirichlet_adaptive_temperature_enabled": False,
+        "dirichlet_adaptive_temperature_base": 1.0,
+        "dirichlet_adaptive_temperature_slope": 0.0,
+        "dirichlet_adaptive_temperature_min": 0.8,
+        "dirichlet_adaptive_temperature_max": 2.5,
         "dirichlet_alpha_cap": 100.0,
         "fusion_cross_asset_mixer_enabled": False,
         "fusion_cross_asset_mixer_layers": 1,
@@ -1332,6 +1342,10 @@ def load_training_metadata_into_config(
             "   Dirichlet controls: "
             f"activation={agent_params.get('dirichlet_alpha_activation')} | "
             f"temperature={agent_params.get('dirichlet_logit_temperature', agent_params.get('logit_temperature', 1.0))} | "
+            f"adaptive_temp={bool(agent_params.get('dirichlet_adaptive_temperature_enabled', False))} | "
+            f"adaptive_base={agent_params.get('dirichlet_adaptive_temperature_base', agent_params.get('dirichlet_logit_temperature', 1.0))} | "
+            f"adaptive_slope={agent_params.get('dirichlet_adaptive_temperature_slope', 0.0)} | "
+            f"adaptive_range=[{agent_params.get('dirichlet_adaptive_temperature_min', 0.8)}, {agent_params.get('dirichlet_adaptive_temperature_max', 2.5)}] | "
             f"alpha_cap={agent_params.get('dirichlet_alpha_cap', agent_params.get('alpha_cap', None))} | "
             f"epsilon={agent_params.get('dirichlet_epsilon')}"
         )
@@ -2493,6 +2507,10 @@ def run_experiment6_tape(
         "   🎛️ Dirichlet controls: "
         f"activation={agent_config.get('dirichlet_alpha_activation')} | "
         f"temperature={agent_config.get('dirichlet_logit_temperature', agent_config.get('logit_temperature', 1.0))} | "
+        f"adaptive_temp={bool(agent_config.get('dirichlet_adaptive_temperature_enabled', False))} | "
+        f"adaptive_base={agent_config.get('dirichlet_adaptive_temperature_base', agent_config.get('dirichlet_logit_temperature', 1.0))} | "
+        f"adaptive_slope={agent_config.get('dirichlet_adaptive_temperature_slope', 0.0)} | "
+        f"adaptive_range=[{agent_config.get('dirichlet_adaptive_temperature_min', 0.8)}, {agent_config.get('dirichlet_adaptive_temperature_max', 2.5)}] | "
         f"alpha_cap={agent_config.get('dirichlet_alpha_cap', agent_config.get('alpha_cap', None))} | "
         f"epsilon={agent_config.get('dirichlet_epsilon')}"
     )
@@ -3177,6 +3195,24 @@ def run_experiment6_tape(
             "dirichlet_exp_clip": copy.deepcopy(agent_config.get("dirichlet_exp_clip")),
             "dirichlet_logit_temperature": copy.deepcopy(
                 agent_config.get("dirichlet_logit_temperature", agent_config.get("logit_temperature"))
+            ),
+            "dirichlet_adaptive_temperature_enabled": bool(
+                agent_config.get("dirichlet_adaptive_temperature_enabled", False)
+            ),
+            "dirichlet_adaptive_temperature_base": copy.deepcopy(
+                agent_config.get(
+                    "dirichlet_adaptive_temperature_base",
+                    agent_config.get("dirichlet_logit_temperature", agent_config.get("logit_temperature", 1.0)),
+                )
+            ),
+            "dirichlet_adaptive_temperature_slope": copy.deepcopy(
+                agent_config.get("dirichlet_adaptive_temperature_slope", 0.0)
+            ),
+            "dirichlet_adaptive_temperature_min": copy.deepcopy(
+                agent_config.get("dirichlet_adaptive_temperature_min", 0.8)
+            ),
+            "dirichlet_adaptive_temperature_max": copy.deepcopy(
+                agent_config.get("dirichlet_adaptive_temperature_max", 2.5)
             ),
             "dirichlet_alpha_cap": copy.deepcopy(
                 agent_config.get("dirichlet_alpha_cap", agent_config.get("alpha_cap"))
@@ -4526,6 +4562,10 @@ def evaluate_experiment6_checkpoint(
         "   🎛️ Eval dirichlet: "
         f"activation={agent_config_eval.get('dirichlet_alpha_activation')} | "
         f"temperature={agent_config_eval.get('dirichlet_logit_temperature', agent_config_eval.get('logit_temperature', 1.0))} | "
+        f"adaptive_temp={bool(agent_config_eval.get('dirichlet_adaptive_temperature_enabled', False))} | "
+        f"adaptive_base={agent_config_eval.get('dirichlet_adaptive_temperature_base', agent_config_eval.get('dirichlet_logit_temperature', 1.0))} | "
+        f"adaptive_slope={agent_config_eval.get('dirichlet_adaptive_temperature_slope', 0.0)} | "
+        f"adaptive_range=[{agent_config_eval.get('dirichlet_adaptive_temperature_min', 0.8)}, {agent_config_eval.get('dirichlet_adaptive_temperature_max', 2.5)}] | "
         f"alpha_cap={agent_config_eval.get('dirichlet_alpha_cap', agent_config_eval.get('alpha_cap', None))} | "
         f"epsilon={agent_config_eval.get('dirichlet_epsilon')}"
     )

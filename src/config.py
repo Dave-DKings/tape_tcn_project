@@ -578,6 +578,14 @@ PHASE1_CONFIG = {
         "dirichlet_alpha_activation": "softplus",  # Stable strictly-positive alpha map
         "dirichlet_exp_clip": (-5.0, 3.0),
         "dirichlet_logit_temperature": 1.0,
+        # Optional adaptive temperature controller:
+        # temperature = clip(base + slope * |logit|, t_min, t_max)
+        # Larger |logit| -> larger temperature -> flatter alpha map.
+        "dirichlet_adaptive_temperature_enabled": False,
+        "dirichlet_adaptive_temperature_base": 1.0,
+        "dirichlet_adaptive_temperature_slope": 0.0,
+        "dirichlet_adaptive_temperature_min": 0.8,
+        "dirichlet_adaptive_temperature_max": 2.5,
         "dirichlet_alpha_cap": 100.0,
 
         # Dirichlet exploration (epsilon annealing)
@@ -878,6 +886,14 @@ PHASE2_CONFIG = {
         "dirichlet_alpha_activation": "softplus",  # Stable strictly-positive alpha map
         "dirichlet_exp_clip": (-5.0, 3.0),
         "dirichlet_logit_temperature": 1.0,
+        # Optional adaptive temperature controller:
+        # temperature = clip(base + slope * |logit|, t_min, t_max)
+        # Larger |logit| -> larger temperature -> flatter alpha map.
+        "dirichlet_adaptive_temperature_enabled": False,
+        "dirichlet_adaptive_temperature_base": 1.0,
+        "dirichlet_adaptive_temperature_slope": 0.0,
+        "dirichlet_adaptive_temperature_min": 0.8,
+        "dirichlet_adaptive_temperature_max": 2.5,
         "dirichlet_alpha_cap": 100.0,
 
         # Dirichlet exploration (epsilon annealing)
