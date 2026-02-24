@@ -1,0 +1,66 @@
+## Task: Debug Why Actuarial Features Are Missing From Training Pipeline
+
+### Problem
+My RL portfolio optimization project has actuarial drawdown-recovery features enabled in config, but they produce ZERO columns in the actual training data. The metadata file confirms:
+
+```json
+"actuarial_features": {
+    "enabled": true,
+    "severity_buckets": [0.05, 0.1, 0.15, 0.2, 0.25, 0.3],
+    "development_horizons": [10, 20, 30, 60, 90, 120],
+    "min_events_for_credibility": 5
+},
+"actuarial_columns_detected": []   // <--- PROBLEM: zero columns made it through
+```
+
+The 4 expected columns are:
+- `Actuarial_Expected_Recovery`
+- `Actuarial_Prob_30d`
+- `Actuarial_Prob_60d`
+- `Actuarial_Reserve_Severity`
+
+### Architecture
+- File: `src/data_utils.py` — contains `DataProcessor` class
+- Method: `add_actuarial_features(self, df)` (around line 1724) — uses an expanding window with `min_window = 252` days
+- Method: `prepare_features_phase1(self)` — the main pipeline that should call `add_actuarial_features`
+- Method: `get_feature_columns(self, phase)` — returns the list of feature column names used by the environment
+- Class: `ActuarialReserveEstimator` (in `src/actuarial.py`) — fits drawdown severity/recovery distributions
+- Config: `src/config.py` — `ACTUARIAL_PARAMS` dict with `enabled: True`
+
+### What I Need You To Do
+
+1. **Trace the pipeline**: Check if `add_actuarial_features()` is actually called inside `prepare_features_phase1()`. If it's missing, add the call.
+
+2. **Check `get_feature_columns()`**: Verify that the 4 actuarial column names are included in the returned feature list. Currently the method checks `if self._actuarial_feature_names:` — this list may never be populated.
+
+3. **Check for silent failures**: The `add_actuarial_features` method has a try/except pattern and uses `ActuarialReserveEstimator.fit()` with an expanding window. If the estimator fails (e.g., not enough drawdown events in early history), the columns may be created as all-NaN and then dropped. Add proper logging so failures are visible.
+
+4. **Check NaN handling**: After actuarial features are computed, they may be dropped during the normalization step or the NaN cleanup step. The features will naturally have NaN for the first `min_window` (252) rows — ensure these are forward-filled or handled without dropping the entire column.
+
+5. **Verify the `_actuarial_feature_names` instance variable** is being set correctly after successful computation, so that `get_feature_columns()` picks them up.
+
+### Key Code Signatures
+
+```python
+# In DataProcessor.__init__():
+self._actuarial_feature_names = []
+self.actuarial_estimator = ActuarialReserveEstimator(...)
+
+# Expected call in prepare_features_phase1():
+df = self.add_actuarial_features(df)
+
+# In add_actuarial_features():
+# Creates columns: Actuarial_Expected_Recovery, Actuarial_Prob_30d, Actuarial_Prob_60d, Actuarial_Reserve_Severity
+# Uses expanding window starting at min_window=252
+# Should set self._actuarial_feature_names = ["Actuarial_Expected_Recovery", "Actuarial_Prob_30d", "Actuarial_Prob_60d", "Actuarial_Reserve_Severity"]
+
+# In get_feature_columns():
+if self._actuarial_feature_names:
+    feature_cols.extend(self._actuarial_feature_names)
+```
+
+### Constraints
+- Do NOT change the actuarial math or the estimator logic — only fix the pipeline integration
+- Ensure the fix works for both phase1 and phase2
+- Add clear logging at each step so I can see "Actuarial features: computed X columns with Y non-null values"
+- The training runs on Google Colab (Python 3.10, TensorFlow 2.x)
